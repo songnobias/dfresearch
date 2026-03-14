@@ -57,16 +57,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Install dependencies
 uv sync
 
-# 3. Download datasets (pick a modality or download all)
-uv run prepare.py --modality image    # ~10 min, downloads image datasets
-uv run prepare.py --modality video    # ~15 min, downloads video datasets
-uv run prepare.py --modality audio    # ~10 min, downloads audio datasets
-uv run prepare.py                     # download all modalities
+# 3. Download datasets (uses 4 concurrent workers by default)
+uv run prepare.py --modality image              # image datasets
+uv run prepare.py --modality video              # video datasets
+uv run prepare.py --modality audio              # audio datasets
+uv run prepare.py                               # all modalities
+uv run prepare.py --modality image --workers 8  # faster with more workers
 
-# 4. Verify data
+# 4. Verify data was cached correctly
 uv run prepare.py --verify --modality image
 
-# 5. Run a training experiment (~10 min)
+# 5. Run a training experiment (~10 min on GPU)
 uv run train_image.py                 # trains EfficientNet-B4 baseline
 uv run train_video.py                 # trains R3D-18 baseline
 uv run train_audio.py                 # trains Wav2Vec2 baseline
@@ -76,6 +77,27 @@ uv run evaluate.py --modality image
 
 # 7. Export for competition
 uv run export.py --modality image --model efficientnet-b4
+```
+
+### Setting up results tracking
+
+Before running the autoresearch loop, create a `results.tsv` file:
+
+```bash
+echo -e "commit\tsn34_score\taccuracy\tmemory_gb\tstatus\tdescription" > results.tsv
+```
+
+This file tracks all experiments. See `program.md` for the full autoresearch workflow.
+
+### CLI entry point
+
+The `dfresearch` CLI wraps all commands:
+
+```bash
+dfresearch prepare --modality image          # download datasets
+dfresearch train --modality image            # train default model
+dfresearch evaluate --modality image         # evaluate checkpoint
+dfresearch export --modality image --model efficientnet-b4  # export for competition
 ```
 
 ## Running the agent
@@ -279,11 +301,17 @@ Before your model is scored on the network, it must pass an entrance exam:
 
 ## Troubleshooting
 
-**"No cached data found"**: Run `uv run prepare.py --modality {modality}` to download datasets.
+**"No cached data found"** / **"No training data"**: Run `uv run prepare.py --modality {modality}` to download datasets. Use `--verify` to check cache status.
 
-**OOM during training**: Reduce `BATCH_SIZE` or `MAX_PER_CLASS` in the training script. Enable gradient accumulation (`GRAD_ACCUM_STEPS`).
+**Downloads are slow**: Increase concurrent workers: `uv run prepare.py --modality image --workers 8`. Check your internet connection and HuggingFace Hub access.
 
-**Low sn34_score**: Check that your model outputs proper logits (not probabilities). Make sure augmentation is enabled during training but disabled during evaluation.
+**Some datasets fail to download**: This is expected — some HuggingFace datasets require authentication or have rate limits. The system skips failures gracefully and continues with remaining datasets. You can re-run prepare to retry failed ones.
+
+**OOM during training**: Reduce `BATCH_SIZE` or `MAX_PER_CLASS` in the training script. Increase `GRAD_ACCUM_STEPS` to compensate. For video models, reduce `NUM_FRAMES`.
+
+**"No CUDA GPU found"**: Training will fall back to CPU but will be very slow. Ensure NVIDIA drivers and CUDA are installed. Check with `nvidia-smi`.
+
+**Low sn34_score**: Check that your model outputs proper logits (not probabilities). Make sure augmentation is enabled during training but disabled during evaluation. Ensure both real and synthetic samples exist in the cache.
 
 **Export fails**: Ensure you've run the training script first to generate `results/checkpoints/{modality}/model.safetensors`.
 

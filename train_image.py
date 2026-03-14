@@ -61,6 +61,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
         torch.cuda.reset_peak_memory_stats()
 
     # ── Model ──
@@ -92,6 +94,10 @@ def main():
 
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
+    if len(train_loader) == 0:
+        print("ERROR: No training data. Run `uv run prepare.py --modality image` first.")
+        sys.exit(1)
+
     # ── Optimizer ──
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -99,7 +105,8 @@ def main():
         weight_decay=WEIGHT_DECAY,
     )
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(USE_AMP and device == "cuda"))
+    amp_enabled = USE_AMP and device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     # ── Training loop ──
     model.train()
@@ -118,38 +125,40 @@ def main():
             if elapsed >= args.time_budget:
                 break
 
-            batch_inputs = batch_inputs.to(device)
-            batch_labels = batch_labels.to(device)
+            batch_inputs = batch_inputs.to(device, non_blocking=True)
+            batch_labels = batch_labels.to(device, non_blocking=True)
 
             # LR warmup
-            if step < WARMUP_STEPS:
+            if WARMUP_STEPS > 0 and step < WARMUP_STEPS:
                 lr_scale = (step + 1) / WARMUP_STEPS
                 for pg in optimizer.param_groups:
                     pg["lr"] = args.lr * lr_scale
 
-            with torch.amp.autocast("cuda", enabled=(USE_AMP and device == "cuda")):
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
                 logits = model(batch_inputs)
                 loss = F.cross_entropy(logits, batch_labels)
                 loss = loss / GRAD_ACCUM_STEPS
-
-            scaler.scale(loss).backward()
-
-            if (step + 1) % GRAD_ACCUM_STEPS == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-
-            total_loss += loss.item() * GRAD_ACCUM_STEPS
-            step += 1
-
-            if step % 50 == 0:
-                avg_loss = total_loss / step
-                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s")
 
             # Fast fail on NaN
             if torch.isnan(loss):
                 print("ERROR: NaN loss detected, aborting.")
                 sys.exit(1)
+
+            scaler.scale(loss).backward()
+
+            if (step + 1) % GRAD_ACCUM_STEPS == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            total_loss += loss.item() * GRAD_ACCUM_STEPS
+            step += 1
+
+            if step % 50 == 0:
+                avg_loss = total_loss / max(step, 1)
+                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s")
 
         elapsed = time.time() - t_start
         if elapsed >= args.time_budget:
@@ -186,14 +195,17 @@ def main():
     print(f"learning_rate:    {args.lr}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
 
-    # Save checkpoint
+    # Save checkpoint (tagged by model name to avoid overwrites)
     from safetensors.torch import save_file
     from pathlib import Path
 
     ckpt_dir = Path("results") / "checkpoints" / "image"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / f"{args.model}.safetensors"
+    save_file(model.state_dict(), ckpt_path)
+    # Also save as model.safetensors for export.py default path
     save_file(model.state_dict(), ckpt_dir / "model.safetensors")
-    print(f"\nCheckpoint saved to {ckpt_dir / 'model.safetensors'}")
+    print(f"\nCheckpoint saved to {ckpt_path}")
 
 
 if __name__ == "__main__":

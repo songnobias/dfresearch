@@ -45,6 +45,7 @@ uv run train_audio.py > run.log 2>&1    # for audio experiments
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation metrics and constants.
 - Modify `src/dfresearch/data.py`. The data pipeline is fixed.
+- Modify `evaluate.py` or `export.py`. These are stable tooling scripts.
 - Install new packages or add dependencies beyond what's in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_model` and `compute_sn34_score` functions are ground truth.
 

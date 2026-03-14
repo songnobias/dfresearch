@@ -70,16 +70,31 @@ def compute_sn34_score(
     """
     y_true = np.asarray(y_true, dtype=int)
     y_prob = np.asarray(y_prob, dtype=float)
+
+    if len(y_true) == 0:
+        return {
+            "sn34_score": 0.0, "mcc": 0.0, "mcc_norm": 0.5,
+            "brier": 0.25, "brier_norm": 0.75, "accuracy": 0.0,
+        }
+
     y_pred = (y_prob >= 0.5).astype(int)
 
-    mcc = matthews_corrcoef(y_true, y_pred)
-    brier = brier_score_loss(y_true, y_prob)
-    acc = accuracy_score(y_true, y_pred)
+    # MCC is undefined when only one class is present; fall back to 0
+    unique_labels = np.unique(y_true)
+    unique_preds = np.unique(y_pred)
+    if len(unique_labels) < 2 or len(unique_preds) < 2:
+        mcc = 0.0
+    else:
+        mcc = float(matthews_corrcoef(y_true, y_pred))
+        if np.isnan(mcc):
+            mcc = 0.0
+
+    brier = float(brier_score_loss(y_true, y_prob))
+    acc = float(accuracy_score(y_true, y_pred))
 
     mcc_norm = (mcc + 1.0) / 2.0
     brier_norm = 1.0 - brier
 
-    # Avoid domain errors with very small values
     mcc_norm = max(mcc_norm, 1e-10)
     brier_norm = max(brier_norm, 1e-10)
 
@@ -87,11 +102,11 @@ def compute_sn34_score(
 
     return {
         "sn34_score": float(sn34),
-        "mcc": float(mcc),
+        "mcc": mcc,
         "mcc_norm": float(mcc_norm),
-        "brier": float(brier),
+        "brier": brier,
         "brier_norm": float(brier_norm),
-        "accuracy": float(acc),
+        "accuracy": acc,
     }
 
 
@@ -123,8 +138,12 @@ def evaluate_model(model, dataloader, device="cuda") -> dict:
             probs = torch.softmax(logits.float(), dim=-1)
             p_synthetic = probs[:, 1].cpu().numpy()
 
-            all_labels.extend(batch_labels.numpy().tolist())
+            all_labels.extend(batch_labels.cpu().numpy().tolist())
             all_probs.extend(p_synthetic.tolist())
+
+    if len(all_labels) == 0:
+        print("WARNING: No validation samples found. Returning zero scores.")
+        return compute_sn34_score(np.array([]), np.array([]))
 
     return compute_sn34_score(np.array(all_labels), np.array(all_probs))
 
@@ -133,76 +152,54 @@ def evaluate_model(model, dataloader, device="cuda") -> dict:
 # Data download
 # ──────────────────────────────────────────────────────────────────────────────
 
-def download_datasets(modality: str):
-    """Download and cache all datasets for a modality."""
-    from dfresearch.data import load_dataset_config, download_and_cache_dataset
-
-    config = load_dataset_config(modality)
-    datasets = config["datasets"]
-
-    print(f"\nDownloading {len(datasets)} {modality} datasets...")
-    print("=" * 60)
-
-    for ds_cfg in datasets:
-        name = ds_cfg["name"]
-        path = ds_cfg["path"]
-        max_samples = ds_cfg.get("max_samples", 1000)
-
-        print(f"\n[{name}] from {path} (max {max_samples} samples)")
-        t0 = time.time()
-        download_and_cache_dataset(
-            dataset_name=name,
-            hf_path=path,
-            modality=modality,
-            max_samples=max_samples,
-        )
-        elapsed = time.time() - t0
-        print(f"  Done in {elapsed:.1f}s")
-
-    print(f"\n{'=' * 60}")
-    print(f"All {modality} datasets downloaded.")
+def download_datasets(modality: str, max_workers: int = 4):
+    """Download and cache all datasets for a modality using concurrent workers."""
+    from dfresearch.data import download_all_datasets
+    download_all_datasets(modality, max_workers=max_workers, progress=True)
 
 
 def verify_cache(modality: str):
     """Print cache status for all datasets of a modality."""
-    from dfresearch.data import load_dataset_config, CACHE_DIR
+    from dfresearch.data import load_dataset_config, CACHE_DIR, _count_media_files
 
     config = load_dataset_config(modality)
     total_samples = 0
+    real_count = 0
+    fake_count = 0
 
     print(f"\nCache status for {modality} datasets:")
-    print(f"{'Dataset':<35} {'Samples':>8} {'Status'}")
-    print("-" * 60)
+    print(f"{'Dataset':<35} {'Type':<12} {'Samples':>8} {'Status'}")
+    print("-" * 70)
 
     for ds_cfg in config["datasets"]:
         name = ds_cfg["name"]
+        media_type = ds_cfg.get("media_type", "unknown")
         cache_path = CACHE_DIR / "datasets" / modality / name
         marker = cache_path / ".download_complete"
 
+        n = _count_media_files(cache_path, modality)
+
         if marker.exists():
-            files = [
-                f for f in cache_path.iterdir()
-                if not f.name.startswith(".")
-            ]
-            n = len(files)
-            total_samples += n
             status = "OK"
-        elif cache_path.exists():
-            files = [
-                f for f in cache_path.iterdir()
-                if not f.name.startswith(".")
-            ]
-            n = len(files)
-            total_samples += n
+        elif cache_path.exists() and n > 0:
             status = "PARTIAL"
         else:
-            n = 0
             status = "MISSING"
 
-        print(f"{name:<35} {n:>8} {status}")
+        total_samples += n
+        if media_type == "real":
+            real_count += n
+        else:
+            fake_count += n
 
-    print("-" * 60)
-    print(f"{'Total':<35} {total_samples:>8}")
+        print(f"{name:<35} {media_type:<12} {n:>8} {status}")
+
+    print("-" * 70)
+    print(f"{'Total':<35} {'':12} {total_samples:>8}")
+    print(f"  Real: {real_count}  |  Synthetic/Semi: {fake_count}")
+    if total_samples > 0:
+        balance = min(real_count, fake_count) / max(real_count, fake_count) if max(real_count, fake_count) > 0 else 0
+        print(f"  Balance ratio: {balance:.2f} (1.0 = perfect)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -224,6 +221,12 @@ def main():
         action="store_true",
         help="Verify cache status instead of downloading",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of concurrent download workers (default: 4)",
+    )
     args = parser.parse_args()
 
     modalities = ["image", "video", "audio"] if args.modality == "all" else [args.modality]
@@ -232,7 +235,7 @@ def main():
         if args.verify:
             verify_cache(mod)
         else:
-            download_datasets(mod)
+            download_datasets(mod, max_workers=args.workers)
 
 
 if __name__ == "__main__":
