@@ -1,0 +1,110 @@
+# Video Dataset Configurations for Training
+# Curated subset of gasbench benchmark datasets for video deepfake detection training.
+
+train_samples_per_class: 2000
+val_samples_per_class: 500
+
+datasets:
+  # ── Real videos ──────────────────────────────────────────────────────────
+  - name: imagenet-vidvrd
+    path: shangxd/imagenet-vidvrd
+    modality: video
+    media_type: real
+    source_format: zip
+    max_samples: 500
+    notes: "ImageNet VidVRD — real video clips"
+
+  - name: ucf101-fullvideo
+    path: bitmind/UCF101Fullvideo
+    modality: video
+    media_type: real
+    source_format: zip
+    max_samples: 500
+    notes: "UCF-101 action recognition videos"
+
+  - name: moments-in-time
+    path: Pai3dot14/Moments_in_Time_Raw_50k
+    modality: video
+    media_type: real
+    source_format: zip
+    max_samples: 500
+    notes: "Moments in Time — diverse 3s clips"
+
+  - name: dfd-real
+    path: Hemgg/deep-fake-detection-dfd-entire-original-datasett
+    modality: video
+    media_type: real
+    source_format: mp4
+    max_samples: 500
+    include_paths: ["DFD_original sequences"]
+    notes: "DeepFakeDetection — original sequences"
+
+  # ── Synthetic videos ─────────────────────────────────────────────────────
+  - name: aislop-videos
+    path: bitmind/aislop-videos
+    modality: video
+    media_type: synthetic
+    source_format: tar
+    max_samples: 500
+    notes: "AI-generated slop videos"
+
+  - name: vidprom
+    path: bitmind/VidProM
+    modality: video
+    media_type: synthetic
+    source_format: tar
+    max_samples: 500
+    notes: "VidProM — text-to-video generated clips"
+
+  - name: deepaction-cogvideox5b
+    path: faridlab/deepaction_v1
+    modality: video
+    media_type: synthetic
+    source_format: mp4
+    max_samples: 300
+    include_paths: ["CogVideoX5B/"]
+    notes: "CogVideoX-5B generated videos"
+
+  - name: deepaction-runwayml
+    path: faridlab/deepaction_v1
+    modality: video
+    media_type: synthetic
+    source_format: mp4
+    max_samples: 300
+    include_paths: ["RunwayML/"]
+    notes: "RunwayML generated videos"
+
+  - name: moviegen-bench
+    path: saiyan-world/Goku-MovieGenBench
+    modality: video
+    media_type: synthetic
+    source_format: mp4
+    max_samples: 400
+    notes: "Movie Gen Bench — AI-generated movie clips"
+
+  # ── Semisynthetic videos ─────────────────────────────────────────────────
+  - name: semisynthetic-video
+    path: bitmind/semisynthetic-video
+    modality: video
+    media_type: semisynthetic
+    source_format: zip
+    max_samples: 300
+    notes: "Semisynthetic face-manipulation videos"
+
+  - name: dfd-fake
+    path: Hemgg/deep-fake-detection-dfd-entire-original-datasett
+    modality: video
+    media_type: semisynthetic
+    source_format: mp4
+    max_samples: 300
+    include_paths: ["DFD_manipulated_sequences"]
+    notes: "DeepFakeDetection — manipulated sequences"
+
+  - name: fakeparts-faceswap
+    path: hi-paris/FakeParts
+    modality: video
+    media_type: semisynthetic
+    source_format: parquet
+    max_samples: 200
+    include_paths: ["Faceswap/"]
+    notes: "FakeParts face-swap videos"

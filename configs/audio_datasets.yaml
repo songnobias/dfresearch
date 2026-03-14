@@ -1,0 +1,106 @@
+# Audio Dataset Configurations for Training
+# Curated subset of gasbench benchmark datasets for audio deepfake detection training.
+
+train_samples_per_class: 3000
+val_samples_per_class: 750
+
+datasets:
+  # ── Real audio ───────────────────────────────────────────────────────────
+  - name: common-voice-17
+    path: fixie-ai/common_voice_17_0
+    modality: audio
+    media_type: real
+    source_format: parquet
+    max_samples: 1000
+    exclude_paths: ["invalidated"]
+    notes: "Mozilla Common Voice 17.0 — multilingual volunteer recordings"
+
+  - name: mls-eng-10k
+    path: parler-tts/mls_eng_10k
+    modality: audio
+    media_type: real
+    source_format: parquet
+    max_samples: 1000
+    notes: "Multilingual LibriSpeech — English 10K subset"
+
+  - name: crema-d
+    path: myleslinder/crema-d
+    modality: audio
+    media_type: real
+    source_format: tar.gz
+    max_samples: 500
+    notes: "CREMA-D — emotional speech from actors"
+
+  - name: slurp
+    path: qmeeus/slurp
+    modality: audio
+    media_type: real
+    source_format: parquet
+    max_samples: 500
+    notes: "SLURP — spoken language understanding"
+
+  - name: english-dialects
+    path: ylacombe/english_dialects
+    modality: audio
+    media_type: real
+    source_format: parquet
+    max_samples: 500
+    notes: "English dialect variations"
+
+  - name: MediaSpeech
+    path: ymoslem/MediaSpeech
+    modality: audio
+    media_type: real
+    source_format: parquet
+    max_samples: 500
+    notes: "MediaSpeech — broadcast media audio"
+
+  # ── Synthetic / AI-generated audio ───────────────────────────────────────
+  - name: arabic-deepfake
+    path: DeepFake-Audio-Rangers/Arabic_Audio_Deepfake
+    modality: audio
+    media_type: synthetic
+    source_format: parquet
+    max_samples: 500
+    notes: "Arabic language deepfake audio"
+
+  - name: emovoice-db
+    path: yhaha/EmoVoice-DB
+    modality: audio
+    media_type: synthetic
+    source_format: zip
+    max_samples: 500
+    notes: "Synthetic emotional voice database"
+
+  - name: elevenlabs-dataset
+    path: skypro1111/elevenlabs_dataset
+    modality: audio
+    media_type: synthetic
+    source_format: parquet
+    max_samples: 500
+    notes: "ElevenLabs TTS-generated speech"
+
+  - name: fake-voices
+    path: unfake/fake_voices
+    modality: audio
+    media_type: synthetic
+    source_format: zip
+    max_samples: 500
+    notes: "Collection of synthetic fake voices"
+
+  - name: ShiftySpeech
+    path: ash56/ShiftySpeech
+    modality: audio
+    media_type: synthetic
+    source_format: tar.gz
+    max_samples: 500
+    include_paths: ["TTS"]
+    notes: "3000h synthetic speech — 7 domains, 6 TTS systems, 12 vocoders"
+
+  - name: thorsten-voice
+    path: Thorsten-Voice/TV-44kHz-Full
+    modality: audio
+    media_type: synthetic
+    source_format: parquet
+    max_samples: 500
+    notes: "German TTS voice — Thorsten"
