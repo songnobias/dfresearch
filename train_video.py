@@ -18,6 +18,12 @@ import argparse
 import time
 import sys
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -194,6 +200,8 @@ def main():
 
     from safetensors.torch import save_file
     from pathlib import Path
+    import json
+    from datetime import datetime
 
     ckpt_dir = Path("results") / "checkpoints" / "video"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +209,28 @@ def main():
     save_file(model.state_dict(), ckpt_path)
     save_file(model.state_dict(), ckpt_dir / "model.safetensors")
     print(f"\nCheckpoint saved to {ckpt_path}")
+
+    runs_dir = Path("runs")
+    runs_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_meta = {
+        "timestamp": ts,
+        "modality": "video",
+        "model": args.model,
+        "sn34_score": metrics["sn34_score"],
+        "accuracy": metrics["accuracy"],
+        "mcc": metrics["mcc"],
+        "brier": metrics["brier"],
+        "training_seconds": training_seconds,
+        "peak_vram_mb": peak_vram_mb,
+        "num_steps": step,
+        "num_params_M": round(num_params / 1e6, 1),
+        "num_frames": NUM_FRAMES,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "augment_level": AUGMENT_LEVEL,
+    }
+    (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
 
 
 if __name__ == "__main__":

@@ -19,9 +19,16 @@ venv/
 results/
 results.tsv
 run.log
+runs/
 experiments/
 cache/
 data/
+STATE.md
+
+# Custom dataset configs (per-developer, not committed)
+datasets/image.yaml
+datasets/video.yaml
+datasets/audio.yaml
 
 .ipynb_checkpoints/
 *.swp

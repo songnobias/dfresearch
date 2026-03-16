@@ -57,25 +57,30 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Install dependencies
 uv sync
 
-# 3. Download datasets (uses 4 concurrent workers by default)
+# 3. Set up environment (optional but recommended)
+cp .env.example .env
+# Edit .env and add your HuggingFace token — needed for gated datasets
+# Get one at: https://huggingface.co/settings/tokens
+
+# 4. Download datasets (uses 4 concurrent workers by default)
 uv run prepare.py --modality image              # image datasets
 uv run prepare.py --modality video              # video datasets
 uv run prepare.py --modality audio              # audio datasets
 uv run prepare.py                               # all modalities
 uv run prepare.py --modality image --workers 8  # faster with more workers
 
-# 4. Verify data was cached correctly
+# 5. Verify data was cached correctly
 uv run prepare.py --verify --modality image
 
-# 5. Run a training experiment (~10 min on GPU)
+# 6. Run a training experiment (~10 min on GPU)
 uv run train_image.py                 # trains EfficientNet-B4 baseline
 uv run train_video.py                 # trains R3D-18 baseline
 uv run train_audio.py                 # trains Wav2Vec2 baseline
 
-# 6. Evaluate
+# 7. Evaluate
 uv run evaluate.py --modality image
 
-# 7. Export for competition
+# 8. Export for competition
 uv run export.py --modality image --model efficientnet-b4
 ```
 

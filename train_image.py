@@ -18,6 +18,12 @@ import argparse
 import time
 import sys
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -195,17 +201,40 @@ def main():
     print(f"learning_rate:    {args.lr}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
 
-    # Save checkpoint (tagged by model name to avoid overwrites)
+    # Save checkpoint
     from safetensors.torch import save_file
     from pathlib import Path
+    import json
+    from datetime import datetime
 
     ckpt_dir = Path("results") / "checkpoints" / "image"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"{args.model}.safetensors"
     save_file(model.state_dict(), ckpt_path)
-    # Also save as model.safetensors for export.py default path
     save_file(model.state_dict(), ckpt_dir / "model.safetensors")
     print(f"\nCheckpoint saved to {ckpt_path}")
+
+    # Save run artifact with timestamp for experiment history
+    runs_dir = Path("runs")
+    runs_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_meta = {
+        "timestamp": ts,
+        "modality": "image",
+        "model": args.model,
+        "sn34_score": metrics["sn34_score"],
+        "accuracy": metrics["accuracy"],
+        "mcc": metrics["mcc"],
+        "brier": metrics["brier"],
+        "training_seconds": training_seconds,
+        "peak_vram_mb": peak_vram_mb,
+        "num_steps": step,
+        "num_params_M": round(num_params / 1e6, 1),
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "augment_level": AUGMENT_LEVEL,
+    }
+    (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
 
 
 if __name__ == "__main__":

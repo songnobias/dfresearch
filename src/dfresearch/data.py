@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+# Load .env if present (HF_TOKEN, CUDA_VISIBLE_DEVICES, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import requests
 import torch
 import yaml
@@ -175,9 +182,11 @@ def download_and_cache_dataset(
     try:
         from datasets import load_dataset
 
+        hf_token = os.environ.get("HF_TOKEN")
         kwargs = dict(streaming=True, trust_remote_code=True)
+        if hf_token:
+            kwargs["token"] = hf_token
 
-        # Try requested split first, fall back to common alternatives
         ds = None
         for try_split in (split, "train", "test", "validation", None):
             try:

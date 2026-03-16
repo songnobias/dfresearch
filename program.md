@@ -21,11 +21,57 @@ To set up a new experiment run, work with the user to:
    - `src/dfresearch/models/` — baseline model implementations.
    - `src/dfresearch/data.py` — data loading pipeline.
    - `src/dfresearch/transforms.py` — augmentation pipeline.
+   - `STATE.md` — your working memory from previous sessions (if it exists).
 4. **Verify data exists**: Check that `~/.cache/dfresearch/datasets/{modality}/` contains cached data. If not, tell the human to run `uv run prepare.py --modality {modality}`. Dataset configs are auto-synced from [gasbench](https://github.com/BitMind-AI/gasbench/tree/main/src/gasbench/dataset/configs) — no local config files to maintain.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+5. **Initialize results.tsv**: Create `results.tsv` with just the header row if it doesn't exist. The baseline will be recorded after the first run.
+6. **Read STATE.md**: If it exists, read it carefully — it contains your notes from previous sessions about what worked, what failed, and what to try next.
+7. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
+
+## Working memory (STATE.md)
+
+You have **no memory between sessions**. The only continuity is what you write to `STATE.md`. If you don't write it there, your next session won't know about it.
+
+After every experiment, update `STATE.md` with:
+- **Current best**: the best sn34_score and what configuration achieved it
+- **What worked**: patterns you've discovered (e.g. "LR 3e-4 > 1e-4 for efficientnet")
+- **What failed**: ideas that didn't pan out, so you don't repeat them
+- **Next ideas**: prioritized list of what to try next, based on your reflections
+- **Key observations**: anything surprising about the data, loss curves, or model behavior
+
+Keep it **short and high-signal** — under 100 lines. Prune old entries that are no longer relevant. This file is your brain between sessions.
+
+Example STATE.md:
+
+```markdown
+# State — image experiments on autoresearch/image-mar14
+
+## Current best
+sn34_score: 0.741 | accuracy: 87.2% | model: efficientnet-b4 | commit: b2c3d4e
+
+## What worked
+- LR 3e-4 with augment_level=3 gave +0.018 over baseline
+- Freezing backbone for first 2 epochs then unfreezing helped convergence
+- Label smoothing 0.1 gave small but consistent improvement
+
+## What failed
+- CLIP ViT-L/14: worse than efficientnet at this data scale (needs more data)
+- LR 5e-4: diverges after ~200 steps
+- Focal loss: no improvement over cross-entropy, added complexity
+- Batch size 64: OOM on this GPU
+
+## Next ideas (priority order)
+1. Try cosine annealing schedule (warmup 100 → cosine decay)
+2. Add mixup augmentation (alpha=0.2)
+3. Try efficientnet_b5 (more capacity, fits in VRAM)
+4. Experiment with dropout 0.5 (currently 0.3)
+
+## Observations
+- Val loss plateaus around step 800, suggesting LR could decay earlier
+- Real/synthetic class balance is 0.87 — slight imbalance toward real
+- JPEG compression augmentation seems most impactful (saw biggest gap without it)
+```
 
 ## Experimentation
 
@@ -42,6 +88,7 @@ uv run train_audio.py > run.log 2>&1    # for audio experiments
 - Modify the training script for the chosen modality (`train_image.py`, `train_video.py`, or `train_audio.py`). Everything is fair game: model choice, architecture changes, optimizer, hyperparameters, batch size, augmentation level, etc.
 - Modify model files in `src/dfresearch/models/` — add new architectures, change existing ones, modify forward passes, add layers, etc.
 - Modify `src/dfresearch/transforms.py` to add or tweak augmentations.
+- Update `STATE.md` with your notes and observations.
 
 **What you CANNOT do:**
 
@@ -63,7 +110,7 @@ uv run train_audio.py > run.log 2>&1    # for audio experiments
 
 Once the script finishes it prints a summary like this:
 
-```bash
+```
 ---
 model:            efficientnet-b4
 sn34_score:       0.723456
@@ -93,8 +140,8 @@ When an experiment is done, log it to `results.tsv` (tab-separated).
 
 The TSV has a header row and 6 columns:
 
-```bash
-commit sn34_score accuracy memory_gb status description
+```
+commit	sn34_score	accuracy	memory_gb	status	description
 ```
 
 1. git commit hash (short, 7 chars)
@@ -104,34 +151,40 @@ commit sn34_score accuracy memory_gb status description
 5. status: `keep`, `discard`, or `crash`
 6. short text description of what this experiment tried
 
-Example:
+Also save the full run log as a timestamped artifact:
 
 ```bash
-commit sn34_score accuracy memory_gb status description
-a1b2c3d 0.723456 0.856000 12.1 keep baseline efficientnet-b4
-b2c3d4e 0.741230 0.872000 12.3 keep increase LR to 3e-4 and augment_level=3
-c3d4e5f 0.718000 0.845000 12.1 discard switch to clip-vit-l14 (worse on this data size)
-d4e5f6g 0.000000 0.000000 0.0 crash double batch size (OOM)
+cp run.log runs/$(date +%Y%m%d_%H%M%S)_run.log
 ```
+
+This preserves detailed logs so you can reference past experiments' full output, not just the TSV summary.
 
 ## The experiment loop
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
-2. Modify the training script with an experimental idea.
-3. git commit
-4. Run the experiment: `uv run train_{modality}.py > run.log 2>&1`
-5. Read out the results: `grep "^sn34_score:\|^accuracy:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the stack trace and attempt a fix. Give up after a few attempts.
-7. Record the results in results.tsv (do NOT commit results.tsv — leave it untracked)
-8. If sn34_score improved (higher is better), keep the commit and advance the branch
-9. If sn34_score is equal or worse, `git reset --hard` back to where you started
+1. **Review state**: Read `STATE.md` and `results.tsv` to understand where you are
+2. **Reflect**: Before choosing the next experiment, review the last 3-5 results. Ask yourself:
+   - What patterns am I seeing? (e.g., "higher augmentation consistently helps")
+   - Why did the last experiment succeed or fail?
+   - Am I making progress or plateauing? If plateauing, try something more radical.
+   - Are there any ideas from my "what failed" list that could work differently now?
+3. **Plan**: Choose the next experiment based on your reflection. Write a 1-sentence hypothesis.
+4. **Implement**: Modify the training script with the experimental change.
+5. **Commit**: `git commit` with a descriptive message
+6. **Run**: `uv run train_{modality}.py > run.log 2>&1`
+7. **Parse**: `grep "^sn34_score:\|^accuracy:\|^peak_vram_mb:" run.log`
+8. **Handle crashes**: If grep is empty, `tail -n 50 run.log` to diagnose. Fix if trivial, skip if fundamental.
+9. **Log**: Record results in `results.tsv`. Save `run.log` to `runs/`.
+10. **Decide**:
+    - sn34_score improved → **keep** the commit, advance the branch
+    - sn34_score same or worse → **discard** (`git reset --hard` to previous)
+11. **Update STATE.md**: Write what you learned. Update best score, patterns, failed ideas, and next priorities.
+12. **Go to 1**
 
 ## Experiment ideas (starting points)
 
 ### Image
-
 - Switch between efficientnet-b4 and clip-vit-l14, compare baselines
 - Try different learning rates: 5e-5, 1e-4, 3e-4, 5e-4
 - Increase augment_level (more aggressive data augmentation)
@@ -143,7 +196,6 @@ LOOP FOREVER:
 - Try focal loss instead of cross-entropy
 
 ### Video
-
 - Switch between r3d-18 and videomae
 - Increase num_frames (more temporal context)
 - Try different frame sampling strategies
@@ -152,7 +204,6 @@ LOOP FOREVER:
 - Experiment with different augmentation levels per frame
 
 ### Audio
-
 - Switch between wav2vec2 and ast
 - Try unfreezing the feature encoder (FREEZE_FEATURE_ENCODER = False)
 - Experiment with larger wav2vec2 models (wav2vec2-large)
@@ -171,4 +222,4 @@ gasbench run --{modality}-model results/exports/{modality}_detector_{model_name}
 
 The entrance exam requires >=80% accuracy. The full benchmark uses sn34_score for TAO emissions ranking.
 
-**NEVER STOP**: Once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep. You are autonomous. If you run out of ideas, think harder — re-read the model code, try combining previous near-misses, try more radical changes. The loop runs until the human interrupts you.
+**NEVER STOP**: Once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep. You are autonomous. If you run out of ideas, think harder — re-read STATE.md, look for patterns in results.tsv, review past run logs in runs/, try combining previous near-misses, try more radical changes. The loop runs until the human interrupts you.
