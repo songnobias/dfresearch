@@ -50,37 +50,70 @@ The repo has three types of files:
 
 **Requirements:** NVIDIA GPU (tested on A100/H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
 
+### 1. Install uv
+
 ```bash
-# 1. Install uv (if you don't have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-# 2. Install dependencies
+### 2. Create virtual environment and install dependencies
+
+```bash
+# Creates a .venv in the project root and installs everything from pyproject.toml
+uv venv --python 3.11
+source .venv/bin/activate
 uv sync
+```
 
-# 3. Set up environment (optional but recommended)
+<details>
+<summary>Alternative: using standard venv + pip</summary>
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Note: `uv run` commands below assume `uv`. If you used pip, replace `uv run <script>` with `python <script>`.
+
+</details>
+
+### 3. Configure environment
+
+```bash
 cp .env.example .env
 # Edit .env and add your HuggingFace token — needed for gated datasets
 # Get one at: https://huggingface.co/settings/tokens
+```
 
-# 4. Download datasets (uses 4 concurrent workers by default)
+### 4. Download datasets
+
+```bash
 uv run prepare.py --modality image              # image datasets
 uv run prepare.py --modality video              # video datasets
 uv run prepare.py --modality audio              # audio datasets
 uv run prepare.py                               # all modalities
 uv run prepare.py --modality image --workers 8  # faster with more workers
+```
 
-# 5. Verify data was cached correctly
+### 5. Verify data
+
+```bash
 uv run prepare.py --verify --modality image
+```
 
-# 6. Run a training experiment (~10 min on GPU)
+### 6. Train (~10 min on GPU)
+
+```bash
 uv run train_image.py                 # trains EfficientNet-B4 baseline
 uv run train_video.py                 # trains R3D-18 baseline
 uv run train_audio.py                 # trains Wav2Vec2 baseline
+```
 
-# 7. Evaluate
+### 7. Evaluate and export
+
+```bash
 uv run evaluate.py --modality image
-
-# 8. Export for competition
 uv run export.py --modality image --model efficientnet-b4
 ```
 

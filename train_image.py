@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import yaml
 
 from prepare import (
     TIME_BUDGET,
@@ -68,7 +69,7 @@ def main():
     print(f"Device: {device}")
     if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
         torch.cuda.reset_peak_memory_stats()
 
     # ── Model ──
@@ -121,8 +122,8 @@ def main():
     total_loss = 0.0
     t_start = time.time()
 
-    print(f"\nTraining for {args.time_budget}s time budget...")
-    print("-" * 60)
+    print(f"\nTraining for {args.time_budget}s time budget...", flush=True)
+    print("-" * 60, flush=True)
 
     while True:
         epoch += 1
@@ -162,11 +163,12 @@ def main():
             total_loss += loss.item() * GRAD_ACCUM_STEPS
             step += 1
 
-            if step % 50 == 0:
+            if step % 10 == 0 or step <= 5:
                 avg_loss = total_loss / max(step, 1)
-                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s")
+                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s", flush=True)
 
         elapsed = time.time() - t_start
+        print(f"  epoch {epoch:>3d} done | steps {step} | elapsed {elapsed:.0f}s", flush=True)
         if elapsed >= args.time_budget:
             break
 
@@ -201,18 +203,25 @@ def main():
     print(f"learning_rate:    {args.lr}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
 
-    # Save checkpoint
+    # Save submission-ready checkpoint directory
     from safetensors.torch import save_file
     from pathlib import Path
     import json
+    import shutil
     from datetime import datetime
+    from export import generate_model_config, generate_model_py
 
     ckpt_dir = Path("results") / "checkpoints" / "image"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"{args.model}.safetensors"
-    save_file(model.state_dict(), ckpt_path)
     save_file(model.state_dict(), ckpt_dir / "model.safetensors")
-    print(f"\nCheckpoint saved to {ckpt_path}")
+
+    config = generate_model_config("image", args.model)
+    with open(ckpt_dir / "model_config.yaml", "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    (ckpt_dir / "model.py").write_text(generate_model_py("image", args.model))
+
+    print(f"\nCheckpoint saved to {ckpt_dir}/")
+    print(f"  model.safetensors, model.py, model_config.yaml — ready for submission")
 
     # Save run artifact with timestamp for experiment history
     runs_dir = Path("runs")

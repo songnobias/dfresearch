@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 
 dependencies = [
+    "gasbench",
     "torch>=2.2.0",
     "torchvision>=0.17.0",
     "torchaudio>=2.2.0",
@@ -38,7 +39,10 @@ dfresearch = "dfresearch.cli:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+gasbench = { path = "../gasbench", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]

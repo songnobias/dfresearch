@@ -18,8 +18,6 @@ Usage:
 """
 
 import argparse
-import shutil
-import textwrap
 import zipfile
 from pathlib import Path
 
@@ -94,59 +92,53 @@ def generate_model_py(modality: str, model_name: str) -> str:
 def export_model(
     modality: str,
     model_name: str,
-    weights_path: Path | None = None,
+    checkpoint_dir: Path | None = None,
     output_dir: Path = Path("results/exports"),
 ) -> Path:
     """
     Export a trained model to a gasbench-compatible ZIP.
 
+    The checkpoint directory should already contain model.safetensors,
+    model.py, and model_config.yaml (written by train_*.py). If any
+    are missing, they are generated on the fly.
+
     Args:
         modality: "image", "video", or "audio".
         model_name: Model identifier (e.g., "efficientnet-b4").
-        weights_path: Path to model.safetensors. If None, uses default checkpoint.
+        checkpoint_dir: Directory with model files. Defaults to results/checkpoints/{modality}.
         output_dir: Directory to write the ZIP file.
 
     Returns:
         Path to the output ZIP file.
     """
-    if weights_path is None:
-        weights_path = Path("results/checkpoints") / modality / "model.safetensors"
+    if checkpoint_dir is None:
+        checkpoint_dir = Path("results/checkpoints") / modality
 
-    if not weights_path.exists():
+    weights = checkpoint_dir / "model.safetensors"
+    if not weights.exists():
         raise FileNotFoundError(
-            f"Weights not found: {weights_path}\n"
+            f"Weights not found: {weights}\n"
             f"Run train_{modality}.py first to generate a checkpoint."
         )
 
+    if not (checkpoint_dir / "model.py").exists():
+        (checkpoint_dir / "model.py").write_text(generate_model_py(modality, model_name))
+
+    if not (checkpoint_dir / "model_config.yaml").exists():
+        config = generate_model_config(modality, model_name)
+        with open(checkpoint_dir / "model_config.yaml", "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Stage files in a temp directory
-    stage_dir = output_dir / f".stage-{modality}-{model_name}"
-    if stage_dir.exists():
-        shutil.rmtree(stage_dir)
-    stage_dir.mkdir(parents=True)
-
-    # 1. model_config.yaml
-    config = generate_model_config(modality, model_name)
-    with open(stage_dir / "model_config.yaml", "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-
-    # 2. model.py
-    model_py = generate_model_py(modality, model_name)
-    (stage_dir / "model.py").write_text(model_py)
-
-    # 3. model.safetensors
-    shutil.copy2(weights_path, stage_dir / "model.safetensors")
-
-    # 4. Create ZIP
     zip_name = f"{modality}_detector_{model_name}.zip"
     zip_path = output_dir / zip_name
 
+    required_files = ["model.safetensors", "model.py", "model_config.yaml"]
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in stage_dir.iterdir():
-            zf.write(f, f.name)
-
-    shutil.rmtree(stage_dir)
+        for name in required_files:
+            f = checkpoint_dir / name
+            if f.exists():
+                zf.write(f, name)
 
     print(f"Exported: {zip_path}")
     print(f"  Contents:")
@@ -173,10 +165,10 @@ def main():
         help="Model name (e.g., efficientnet-b4, clip-vit-l14, r3d-18, videomae, wav2vec2, ast)",
     )
     parser.add_argument(
-        "--weights",
+        "--checkpoint-dir",
         type=Path,
         default=None,
-        help="Path to model.safetensors (default: results/checkpoints/{modality}/model.safetensors)",
+        help="Checkpoint directory (default: results/checkpoints/{modality})",
     )
     parser.add_argument(
         "--output-dir",
@@ -195,7 +187,7 @@ def main():
     zip_path = export_model(
         modality=args.modality,
         model_name=args.model,
-        weights_path=args.weights,
+        checkpoint_dir=args.checkpoint_dir,
         output_dir=args.output_dir,
     )
 

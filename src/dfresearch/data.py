@@ -2,7 +2,7 @@
 Dataset download, caching, and DataLoader utilities for dfresearch.
 
 Supports image, video, and audio modalities.
-Downloads from HuggingFace Hub using the datasets library, with local caching.
+Downloads from HuggingFace Hub using gasbench's download engine, with local caching.
 Supports concurrent downloads across multiple datasets.
 
 Dataset configs are pulled directly from BitMind-AI/gasbench at runtime,
@@ -30,6 +30,8 @@ import torch
 import yaml
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
+
+from dfresearch.transforms import resize_image, apply_random_augmentations, random_horizontal_flip
 
 CACHE_DIR = Path(os.environ.get("DFRESEARCH_CACHE", "~/.cache/dfresearch")).expanduser()
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -162,14 +164,19 @@ def download_and_cache_dataset(
     hf_path: str,
     modality: str,
     max_samples: int = DEFAULT_SAMPLES_PER_DATASET,
-    split: str = "train",
+    media_type: str = "synthetic",
+    source_format: Optional[str] = None,
+    data_columns: Optional[list[str]] = None,
     include_paths: Optional[list[str]] = None,
     exclude_paths: Optional[list[str]] = None,
+    media_per_archive: int = 100,
+    archives_per_dataset: int = 5,
 ) -> Path:
     """
     Download a dataset from HuggingFace and cache locally.
 
-    Returns the cache directory path containing the samples.
+    Uses gasbench's download_and_extract for robust handling of all
+    source formats (parquet, zip, tar, raw media files).
     """
     cache_path = CACHE_DIR / "datasets" / modality / dataset_name
     marker = cache_path / ".download_complete"
@@ -180,79 +187,66 @@ def download_and_cache_dataset(
     cache_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        from datasets import load_dataset
+        from gasbench.dataset.config import BenchmarkDatasetConfig
+        from gasbench.dataset.download import download_and_extract
+
+        config = BenchmarkDatasetConfig(
+            name=dataset_name,
+            path=hf_path,
+            modality=modality,
+            media_type=media_type,
+            source_format=source_format or "",
+            data_columns=data_columns,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            media_per_archive=media_per_archive,
+            archives_per_dataset=archives_per_dataset,
+        )
 
         hf_token = os.environ.get("HF_TOKEN")
-        kwargs = dict(streaming=True, trust_remote_code=True)
-        if hf_token:
-            kwargs["token"] = hf_token
 
-        ds = None
-        for try_split in (split, "train", "test", "validation", None):
-            try:
-                if try_split is None:
-                    ds = load_dataset(hf_path, **kwargs)
-                    if hasattr(ds, "keys"):
-                        first_key = next(iter(ds.keys()))
-                        ds = ds[first_key]
-                else:
-                    ds = load_dataset(hf_path, split=try_split, **kwargs)
-                break
-            except (ValueError, KeyError):
-                continue
-
-        if ds is None:
-            print(f"  Warning: No usable split found for {dataset_name}")
-            return cache_path
+        eff_archives = archives_per_dataset
+        eff_media = media_per_archive
+        if eff_archives == -1 or eff_archives > max_samples:
+            eff_archives = max(1, max_samples)
+        if eff_media == -1 or eff_media > max_samples:
+            eff_media = max_samples
 
         saved = 0
-        skipped = 0
-        for item in ds:
+        for sample in download_and_extract(
+            dataset=config,
+            media_per_archive=eff_media,
+            archives_per_dataset=eff_archives,
+            hf_token=hf_token,
+        ):
             if saved >= max_samples:
                 break
-
-            if include_paths or exclude_paths:
-                row_path = _extract_path_hint(item)
-                if row_path:
-                    if include_paths and not any(inc in row_path for inc in include_paths):
-                        skipped += 1
+            try:
+                if modality == "image":
+                    img = sample.get("image")
+                    if img is None:
                         continue
-                    if exclude_paths and any(exc in row_path for exc in exclude_paths):
-                        skipped += 1
+                    img.convert("RGB").save(cache_path / f"{saved:06d}.png")
+                elif modality == "video":
+                    video = sample.get("video_bytes")
+                    if video is None:
                         continue
-
-            ok = False
-            if modality == "image":
-                ok = _cache_image_sample(item, cache_path, saved)
-            elif modality == "video":
-                ok = _cache_video_sample(item, cache_path, saved)
-            elif modality == "audio":
-                ok = _cache_audio_sample(item, cache_path, saved)
-
-            if ok:
+                    (cache_path / f"{saved:06d}.mp4").write_bytes(video)
+                elif modality == "audio":
+                    audio = sample.get("audio_bytes")
+                    if audio is None:
+                        continue
+                    (cache_path / f"{saved:06d}.wav").write_bytes(audio)
                 saved += 1
-            else:
-                skipped += 1
-                if skipped > 50 and saved == 0:
-                    print(f"  Warning: 50+ rows skipped with no successful caches for {dataset_name}")
-                    print(f"  Available columns: {list(item.keys()) if isinstance(item, dict) else 'N/A'}")
-                    break
+            except Exception:
+                continue
 
         marker.touch()
-        print(f"  Cached {saved} samples for {dataset_name} (skipped {skipped})")
+        print(f"  Cached {saved} samples for {dataset_name}")
     except Exception as e:
         print(f"  Warning: Could not download {dataset_name}: {e}")
 
     return cache_path
-
-
-def _extract_path_hint(item: dict) -> Optional[str]:
-    """Try to extract a file path from a dataset row for include/exclude filtering."""
-    for key in ("file", "filename", "path", "filepath", "source", "url", "id"):
-        val = item.get(key)
-        if isinstance(val, str):
-            return val
-    return None
 
 
 def download_all_datasets(
@@ -284,8 +278,13 @@ def download_all_datasets(
             hf_path=ds_cfg["path"],
             modality=modality,
             max_samples=max_samples_per_dataset,
+            media_type=ds_cfg.get("media_type", "synthetic"),
+            source_format=ds_cfg.get("source_format"),
+            data_columns=ds_cfg.get("data_columns"),
             include_paths=ds_cfg.get("include_paths"),
             exclude_paths=ds_cfg.get("exclude_paths"),
+            media_per_archive=ds_cfg.get("media_per_archive", 100),
+            archives_per_dataset=ds_cfg.get("archives_per_dataset", 5),
         )
         elapsed = time.time() - t0
         n = _count_media_files(cache_path, modality)
@@ -331,93 +330,6 @@ def _modality_extensions(modality: str) -> set[str]:
     }[modality]
 
 
-# ---------------------------------------------------------------------------
-# Cache helpers — return True if sample was successfully saved
-# ---------------------------------------------------------------------------
-
-def _cache_image_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    img = None
-    for key in IMAGE_COLUMNS:
-        val = item.get(key)
-        if val is not None:
-            img = val
-            break
-    if img is None:
-        return False
-    try:
-        out = cache_path / f"{idx:06d}.png"
-        if isinstance(img, Image.Image):
-            img.convert("RGB").save(out)
-            return True
-        elif isinstance(img, bytes):
-            Image.open(io.BytesIO(img)).convert("RGB").save(out)
-            return True
-        elif isinstance(img, dict) and "bytes" in img:
-            Image.open(io.BytesIO(img["bytes"])).convert("RGB").save(out)
-            return True
-        elif isinstance(img, dict) and "path" in img:
-            Image.open(img["path"]).convert("RGB").save(out)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def _cache_video_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    video = None
-    for key in VIDEO_COLUMNS:
-        val = item.get(key)
-        if val is not None:
-            video = val
-            break
-    if video is None:
-        return False
-    try:
-        out = cache_path / f"{idx:06d}.mp4"
-        if isinstance(video, bytes):
-            out.write_bytes(video)
-            return True
-        elif isinstance(video, dict) and "bytes" in video:
-            out.write_bytes(video["bytes"])
-            return True
-        elif isinstance(video, dict) and "path" in video:
-            import shutil
-            shutil.copy2(video["path"], out)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def _cache_audio_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    audio = None
-    for key in AUDIO_COLUMNS:
-        val = item.get(key)
-        if val is not None:
-            audio = val
-            break
-    if audio is None:
-        return False
-    try:
-        if isinstance(audio, dict) and "array" in audio:
-            arr = np.array(audio["array"], dtype=np.float32)
-            sr = audio.get("sampling_rate", 16000)
-            np.savez_compressed(cache_path / f"{idx:06d}.npz", audio=arr, sr=sr)
-            return True
-        elif isinstance(audio, dict) and "bytes" in audio:
-            (cache_path / f"{idx:06d}.wav").write_bytes(audio["bytes"])
-            return True
-        elif isinstance(audio, bytes):
-            (cache_path / f"{idx:06d}.wav").write_bytes(audio)
-            return True
-        elif isinstance(audio, dict) and "path" in audio:
-            import shutil
-            ext = Path(audio["path"]).suffix or ".wav"
-            shutil.copy2(audio["path"], cache_path / f"{idx:06d}{ext}")
-            return True
-    except Exception:
-        pass
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +351,6 @@ class ImageDeepfakeDataset(Dataset):
             img = np.array(Image.open(path).convert("RGB"))
         except Exception:
             img = np.zeros((self.target_size[0], self.target_size[1], 3), dtype=np.uint8)
-        from dfresearch.transforms import resize_image, apply_random_augmentations, random_horizontal_flip
         img = resize_image(img, self.target_size)
         if self.augment_level > 0:
             img = apply_random_augmentations(img, level=self.augment_level)
@@ -472,7 +383,6 @@ class VideoDeepfakeDataset(Dataset):
         except Exception:
             frames = np.zeros(
                 (self.num_frames, self.target_size[0], self.target_size[1], 3), dtype=np.uint8)
-        from dfresearch.transforms import resize_image, apply_random_augmentations
         processed = []
         for i in range(min(frames.shape[0], self.num_frames)):
             frame = resize_image(frames[i], self.target_size)
@@ -624,13 +534,14 @@ def make_dataloader(
         raise ValueError(f"Unknown modality: {modality}")
 
     use_drop_last = (split == "train") and (len(dataset) > batch_size)
+    eff_workers = min(num_workers, len(dataset))
 
     return DataLoader(
         dataset,
         batch_size=min(batch_size, max(len(dataset), 1)),
         shuffle=(split == "train"),
-        num_workers=num_workers,
+        num_workers=eff_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=use_drop_last,
-        persistent_workers=(num_workers > 0),
+        persistent_workers=(eff_workers > 0),
     )

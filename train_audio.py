@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import yaml
 
 from prepare import (
     TIME_BUDGET,
@@ -204,10 +205,16 @@ def main():
 
     ckpt_dir = Path("results") / "checkpoints" / "audio"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"{args.model}.safetensors"
-    save_file(model.state_dict(), ckpt_path)
     save_file(model.state_dict(), ckpt_dir / "model.safetensors")
-    print(f"\nCheckpoint saved to {ckpt_path}")
+
+    from export import generate_model_config, generate_model_py
+    config = generate_model_config("audio", args.model)
+    with open(ckpt_dir / "model_config.yaml", "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    (ckpt_dir / "model.py").write_text(generate_model_py("audio", args.model))
+
+    print(f"\nCheckpoint saved to {ckpt_dir}/")
+    print(f"  model.safetensors, model.py, model_config.yaml — ready for submission")
 
     runs_dir = Path("runs")
     runs_dir.mkdir(exist_ok=True)
