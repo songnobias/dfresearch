@@ -114,20 +114,29 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     # ── Training loop ──
+    from tqdm import tqdm
+
     model.train()
     step = 0
     epoch = 0
     total_loss = 0.0
     t_start = time.time()
+    budget = args.time_budget
+    is_tty = sys.stdout.isatty()
 
-    print(f"\nTraining for {args.time_budget}s time budget...")
-    print("-" * 60)
+    print(f"\nTraining for {budget}s budget...", flush=True)
 
-    while True:
+    time_up = False
+    while not time_up:
         epoch += 1
-        for batch_inputs, batch_labels in train_loader:
+        epoch_loss = 0.0
+        epoch_steps = 0
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not is_tty, leave=False, ncols=100)
+        for batch_inputs, batch_labels in pbar:
             elapsed = time.time() - t_start
-            if elapsed >= args.time_budget:
+            if elapsed >= budget:
+                time_up = True
                 break
 
             batch_inputs = batch_inputs.to(device, non_blocking=True)
@@ -156,16 +165,22 @@ def main():
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            total_loss += loss.item() * GRAD_ACCUM_STEPS
+            batch_loss = loss.item() * GRAD_ACCUM_STEPS
+            total_loss += batch_loss
+            epoch_loss += batch_loss
+            epoch_steps += 1
             step += 1
 
-            if step % 20 == 0:
-                avg_loss = total_loss / max(step, 1)
-                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s")
+            lr = optimizer.param_groups[0]["lr"]
+            remaining = max(0, budget - elapsed)
+            pbar.set_postfix_str(f"loss={epoch_loss / epoch_steps:.4f} lr={lr:.1e} rem={remaining:.0f}s")
+        pbar.close()
 
         elapsed = time.time() - t_start
-        if elapsed >= args.time_budget:
-            break
+        if epoch_steps > 0:
+            avg_loss = epoch_loss / epoch_steps
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"Epoch {epoch:<4d} | loss={avg_loss:.4f} | lr={lr:.1e} | step={step} | {elapsed:.0f}s/{budget}s", flush=True)
 
     training_seconds = time.time() - t_start
 

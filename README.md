@@ -4,7 +4,16 @@ Autonomous deepfake detection research for [BitMind Subnet 34](https://bitmind.a
 
 Give an AI agent a deepfake detection training setup and let it experiment autonomously. It modifies the training code, trains for 10 minutes, checks if the result improved, keeps or discards, and repeats. You wake up to a log of experiments and a better model.
 
-Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Datasets sourced from [BitMind-AI/gasbench](https://github.com/BitMind-AI/gasbench).
+Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch) and [unconst/Arbos](https://github.com/unconst/Arbos). Datasets sourced from [BitMind-AI/gasbench](https://github.com/BitMind-AI/gasbench).
+
+### TL;DR — train and submit in 4 commands
+
+```bash
+uv sync                                          # install deps
+uv run prepare.py --modality image                # download datasets
+uv run train_image.py                             # train (10 min, outputs submission-ready checkpoint)
+uv run export.py --modality image --model efficientnet-b4  # package ZIP for submission
+```
 
 ---
 
@@ -189,6 +198,113 @@ uv run train_audio.py --model ast
 
 Or edit the `MODEL_NAME` constant at the top of the training script.
 
+## Adding a new model
+
+You can add any model from HuggingFace, timm, or custom PyTorch code. There are 4 files to touch.
+
+### 1. Create the model file
+
+Create a new file in `src/dfresearch/models/{modality}/`. The file must:
+- Define a `nn.Module` class that takes **uint8 `[B, C, H, W]` input** and returns **`[B, 2]` logits**
+- Handle normalization inside `forward()` (the input is always raw `[0, 255]`)
+- Define `load_model(weights_path, num_classes=2)` at module level for gasbench
+
+Example — adding DINOv2 for image detection:
+
+```python
+# src/dfresearch/models/image/dinov2.py
+
+import torch
+import torch.nn as nn
+from safetensors.torch import load_file
+
+DINO_MEAN = (0.485, 0.456, 0.406)
+DINO_STD = (0.229, 0.224, 0.225)
+
+
+class DINOv2Detector(nn.Module):
+    def __init__(self, num_classes=2, pretrained=True, dropout=0.3):
+        super().__init__()
+        self.backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+        if not pretrained:
+            self.backbone.apply(lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None)
+        self.head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(768, num_classes),
+        )
+        self.register_buffer("mean", torch.tensor(DINO_MEAN).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor(DINO_STD).view(1, 3, 1, 1))
+
+    def forward(self, x):
+        x = x.float() / 255.0
+        x = (x - self.mean) / self.std
+        features = self.backbone(x)
+        return self.head(features)
+
+
+def load_model(weights_path, num_classes=2):
+    model = DINOv2Detector(num_classes=num_classes, pretrained=False)
+    model.load_state_dict(load_file(weights_path))
+    model.train(False)
+    return model
+```
+
+> **Key rules for `forward()`**: Input is always uint8 `[0, 255]`. Output is always `[B, 2]` logits (not probabilities). Normalization happens inside the model, not in the data pipeline.
+
+### 2. Register in the model registry
+
+Edit `src/dfresearch/models/__init__.py`:
+
+```python
+from dfresearch.models.image.dinov2 import DINOv2Detector
+
+MODEL_REGISTRY = {
+    "image": {
+        "efficientnet-b4": EfficientNetB4Detector,
+        "clip-vit-l14": CLIPViTDetector,
+        "dinov2-vitb14": DINOv2Detector,  # ← add here
+    },
+    ...
+}
+```
+
+### 3. Register in the export map
+
+Edit `export.py` — add the module path so export knows where to find `model.py`:
+
+```python
+MODEL_MODULES = {
+    "image": {
+        "efficientnet-b4": "dfresearch.models.image.efficientnet",
+        "clip-vit-l14": "dfresearch.models.image.clip_vit",
+        "dinov2-vitb14": "dfresearch.models.image.dinov2",  # ← add here
+    },
+    ...
+}
+```
+
+### 4. Use it
+
+```bash
+uv run train_image.py --model dinov2-vitb14
+uv run export.py --modality image --model dinov2-vitb14
+```
+
+### Allowed imports in submissions
+
+Your `model.py` can only use these packages (enforced by gasbench):
+
+`torch`, `torchvision`, `torchaudio`, `transformers`, `timm`, `einops`, `safetensors`, `PIL`, `cv2`, `numpy`, `scipy`
+
+If your model needs a package not on this list, it won't run in the competition. See the [gasbench safetensors spec](https://github.com/bitmind-ai/gasbench/blob/main/docs/Safetensors.md#allowed-imports) for the full list.
+
+### Tips for choosing models
+
+- **timm models** (`timm.create_model("model_name", ...)`) — 1000+ image architectures. Good starting point. Try `convnext_base`, `swin_base_patch4_window7_224`, `efficientnetv2_m`.
+- **HuggingFace transformers** — CLIP, DINOv2, SigLIP, VideoMAE, Wav2Vec2, Whisper, etc. Often the strongest pretrained representations.
+- **Ensemble approach** — Train multiple models, average their logits in a wrapper `forward()`. Package as a single `model.py` with multiple backbones.
+- **Smaller is faster** — The entrance exam has a timeout. A 3B parameter model might be more accurate but fail the time limit.
+
 ## Project structure
 
 ```
@@ -325,22 +441,21 @@ detector.zip
 └── model.safetensors    # Trained weights
 ```
 
-The `export.py` script generates this automatically.
+Training automatically generates all three files in `results/checkpoints/{modality}/`. The `export.py` script ZIPs them for submission.
 
 ### End-to-end competition flow
 
 ```bash
-# 1. Train your model
+# 1. Train — checkpoint dir is submission-ready after this
 uv run train_image.py
 
 # 2. Evaluate locally
 uv run evaluate.py --modality image
 
-# 3. Export to competition format
+# 3. Package as ZIP for submission
 uv run export.py --modality image --model efficientnet-b4
 
-# 4. Test with gasbench (requires gasbench installed)
-pip install gasbench
+# 4. Test with gasbench
 gasbench run --image-model results/exports/image_detector_efficientnet-b4.zip --small
 
 # 5. Push to BitMind Subnet 34
