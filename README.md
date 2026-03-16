@@ -10,7 +10,7 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). D
 
 ## How it works
 
-```
+```bash
 ┌──────────────────────────────────────────────────────────┐
 │  SETUP                                                    │
 │  1. Download datasets (uv run prepare.py)                 │
@@ -104,7 +104,7 @@ dfresearch export --modality image --model efficientnet-b4  # export for competi
 
 Point your AI coding agent (Claude, Codex, etc.) at this repo and prompt:
 
-```
+```bash
 Hi, have a look at program.md and let's kick off a new image experiment!
 Let's do the setup first.
 ```
@@ -115,24 +115,24 @@ The agent will create a branch, establish a baseline, and start experimenting au
 
 ### Image (2 baselines)
 
-| Model | Params | Source | Description |
-|-------|--------|--------|-------------|
-| **EfficientNet-B4** | 19M | [timm](https://github.com/huggingface/pytorch-image-models) | ImageNet-pretrained CNN. The standard baseline from FaceForensics++ and DFDC challenge literature. Proven, efficient, well-understood. |
-| **CLIP ViT-L/14** | 304M | [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) | OpenAI's vision-language model. CLIP features generalize exceptionally well across unseen generators ([UniversalFakeDetect, CVPR 2023](https://arxiv.org/abs/2302.10174)). Fine-tune the vision encoder with a classification head. |
+| Model               | Params | Source                                                                                | Description                                                                                                                                                                                                                         |
+| ------------------- | ------ | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **EfficientNet-B4** | 19M    | [timm](https://github.com/huggingface/pytorch-image-models)                           | ImageNet-pretrained CNN. The standard baseline from FaceForensics++ and DFDC challenge literature. Proven, efficient, well-understood.                                                                                              |
+| **CLIP ViT-L/14**   | 304M   | [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) | OpenAI's vision-language model. CLIP features generalize exceptionally well across unseen generators ([UniversalFakeDetect, CVPR 2023](https://arxiv.org/abs/2302.10174)). Fine-tune the vision encoder with a classification head. |
 
 ### Video (2 baselines)
 
-| Model | Params | Source | Description |
-|-------|--------|--------|-------------|
-| **R3D-18** | 33M | [torchvision](https://pytorch.org/vision/stable/models/video_resnet.html) | 3D ResNet-18 pretrained on Kinetics-400. 3D convolutions capture temporal artifacts between frames. Lightweight, fast to train. |
-| **VideoMAE** | 87M | [MCG-NJU/videomae-base](https://huggingface.co/MCG-NJU/videomae-base) | Self-supervised masked autoencoder pretrained on video. Strong spatiotemporal representations with excellent transfer learning. |
+| Model        | Params | Source                                                                    | Description                                                                                                                     |
+| ------------ | ------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| **R3D-18**   | 33M    | [torchvision](https://pytorch.org/vision/stable/models/video_resnet.html) | 3D ResNet-18 pretrained on Kinetics-400. 3D convolutions capture temporal artifacts between frames. Lightweight, fast to train. |
+| **VideoMAE** | 87M    | [MCG-NJU/videomae-base](https://huggingface.co/MCG-NJU/videomae-base)     | Self-supervised masked autoencoder pretrained on video. Strong spatiotemporal representations with excellent transfer learning. |
 
 ### Audio (2 baselines)
 
-| Model | Params | Source | Description |
-|-------|--------|--------|-------------|
-| **Wav2Vec2** | 95M | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base) | Self-supervised pretrained on 960h of speech. Dominant approach in ASVspoof challenges. Takes raw waveform input (16kHz, 6s). |
-| **AST** | 87M | [MIT/ast-finetuned-audioset-10-10-0.4593](https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593) | Audio Spectrogram Transformer — applies ViT to mel-spectrograms. AudioSet pretrained. Different inductive bias from Wav2Vec2 (frequency-domain vs time-domain). |
+| Model        | Params | Source                                                                                                    | Description                                                                                                                                                     |
+| ------------ | ------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Wav2Vec2** | 95M    | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base)                                   | Self-supervised pretrained on 960h of speech. Dominant approach in ASVspoof challenges. Takes raw waveform input (16kHz, 6s).                                   |
+| **AST**      | 87M    | [MIT/ast-finetuned-audioset-10-10-0.4593](https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593) | Audio Spectrogram Transformer — applies ViT to mel-spectrograms. AudioSet pretrained. Different inductive bias from Wav2Vec2 (frequency-domain vs time-domain). |
 
 ## Switching models
 
@@ -167,11 +167,6 @@ dfresearch/
 ├── export.py                          # Export to gasbench ZIP format
 ├── analysis.ipynb                     # Experiment visualization
 │
-├── configs/
-│   ├── image_datasets.yaml            # Training datasets for images
-│   ├── video_datasets.yaml            # Training datasets for videos
-│   └── audio_datasets.yaml            # Training datasets for audio
-│
 └── src/dfresearch/
     ├── __init__.py
     ├── cli.py                         # CLI entry point
@@ -190,34 +185,84 @@ dfresearch/
             └── ast_model.py           # Audio Spectrogram Transformer
 ```
 
+**No local dataset configs.** Dataset definitions are pulled directly from [gasbench](https://github.com/BitMind-AI/gasbench/tree/main/src/gasbench/dataset/configs) at runtime and cached in `~/.cache/dfresearch/gasbench_configs/`. This keeps dfresearch automatically in sync with the competition benchmark datasets.
+
 ## Datasets
 
-Training datasets are curated subsets of the [gasbench](https://github.com/BitMind-AI/gasbench) benchmark suite, selected for diversity, accessibility, and training utility.
+Dataset configs are pulled directly from [BitMind-AI/gasbench](https://github.com/BitMind-AI/gasbench/tree/main/src/gasbench/dataset/configs) at runtime -- the same configs used by the competition benchmark. This means:
 
-### Image datasets
+- **Always in sync.** When gasbench adds new datasets, dfresearch picks them up automatically.
+- **No stale copies.** You never have to manually update dataset lists.
+- **Cached locally.** Configs are fetched once and stored at `~/.cache/dfresearch/gasbench_configs/`.
 
-| Type | Datasets | Samples |
-|------|----------|---------|
-| Real | flickr30k, celeb-a-hq, ffhq-256, ms-coco-unique, open-image-v7, lfw | ~7,000 |
-| Synthetic | SFHQ, DALL-E 3, MidJourney, JourneyDB, FakeClue, Nano-banana | ~5,500 |
-| Semisynthetic | face-swap | ~500 |
+To re-fetch configs (e.g., after gasbench adds new datasets):
 
-### Video datasets
+```bash
+uv run prepare.py --refresh-configs
+```
 
-| Type | Datasets | Samples |
-|------|----------|---------|
-| Real | imagenet-vidvrd, ucf101, moments-in-time, dfd-real | ~2,000 |
-| Synthetic | aislop-videos, vidprom, deepaction, moviegen-bench | ~2,000 |
-| Semisynthetic | semisynthetic-video, dfd-fake, fakeparts-faceswap | ~800 |
+### How downloading works
 
-### Audio datasets
+`prepare.py` downloads up to `--max-samples` samples (default: 500) from each dataset in the gasbench config. This gives you a diverse training set that covers the same distribution the competition evaluates on.
 
-| Type | Datasets | Samples |
-|------|----------|---------|
-| Real | common-voice-17, mls-eng-10k, crema-d, slurp, english-dialects, MediaSpeech | ~4,000 |
-| Synthetic | arabic-deepfake, emovoice-db, elevenlabs, fake-voices, ShiftySpeech, thorsten | ~3,000 |
+```bash
+# Download 500 samples per dataset (default)
+uv run prepare.py --modality image
 
-All datasets are publicly available on HuggingFace. See `configs/*.yaml` for full details.
+# Download more for better training
+uv run prepare.py --modality image --max-samples 1000
+
+# Download fewer for quick experiments
+uv run prepare.py --modality image --max-samples 100
+
+# Check what's cached
+uv run prepare.py --verify --modality image
+```
+
+The `--verify` flag shows a breakdown by dataset with real/synthetic/semisynthetic counts and class balance ratio.
+
+### Current dataset coverage (from gasbench)
+
+| Modality | Datasets | Types |
+|----------|----------|-------|
+| **Image** | 60+ datasets | Real (flickr30k, celeb-a-hq, ffhq, MS-COCO, ...), Synthetic (DALL-E 3, MidJourney, SFHQ, ...), Semisynthetic (face-swap, PICA-100K, ...) |
+| **Video** | 45+ datasets | Real (UCF-101, Moments-in-Time, DFD, ...), Synthetic (VidProM, DeepAction, MovieGen, ...), Semisynthetic (DFD-fake, FakeParts, ...) |
+| **Audio** | 35+ datasets | Real (Common Voice, LibriSpeech, GigaSpeech, ...), Synthetic (ElevenLabs, ShiftySpeech, FakeVoices, ...) |
+
+See the [gasbench dataset configs](https://github.com/BitMind-AI/gasbench/tree/main/src/gasbench/dataset/configs) for the complete, authoritative list.
+
+### Adding custom datasets
+
+You can add your own HuggingFace datasets for training without modifying any code. Create a YAML file in the `datasets/` directory:
+
+```bash
+# Copy the example
+cp datasets/image.yaml.example datasets/image.yaml
+```
+
+Edit `datasets/image.yaml`:
+
+```yaml
+datasets:
+  - name: my-gan-faces
+    path: myusername/gan-generated-faces
+    modality: image
+    media_type: synthetic
+
+  - name: my-real-photos
+    path: myusername/real-photo-collection
+    modality: image
+    media_type: real
+```
+
+Then download as usual — your datasets get merged with the gasbench datasets automatically:
+
+```bash
+uv run prepare.py --modality image
+uv run prepare.py --verify --modality image  # your datasets show up here
+```
+
+Each entry needs four fields: `name` (unique ID), `path` (HuggingFace repo), `modality`, and `media_type` (`real`, `synthetic`, or `semisynthetic`). See `datasets/README.md` for the full format and advanced options.
 
 ## Competition workflow
 
@@ -270,6 +315,7 @@ gascli d push \
 ### Entrance exam
 
 Before your model is scored on the network, it must pass an entrance exam:
+
 - Runs `gasbench run --small` internally
 - Must achieve **>= 80% accuracy** to pass
 - Maximum 1 hour 25 minute timeout

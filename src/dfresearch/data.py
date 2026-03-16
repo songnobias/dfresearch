@@ -4,6 +4,9 @@ Dataset download, caching, and DataLoader utilities for dfresearch.
 Supports image, video, and audio modalities.
 Downloads from HuggingFace Hub using the datasets library, with local caching.
 Supports concurrent downloads across multiple datasets.
+
+Dataset configs are pulled directly from BitMind-AI/gasbench at runtime,
+so they stay in sync with the competition benchmark datasets automatically.
 """
 
 import io
@@ -15,13 +18,24 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import requests
 import torch
 import yaml
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 CACHE_DIR = Path(os.environ.get("DFRESEARCH_CACHE", "~/.cache/dfresearch")).expanduser()
-CONFIGS_DIR = Path(__file__).parent.parent.parent / "configs"
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+GASBENCH_RAW_URL = (
+    "https://raw.githubusercontent.com/BitMind-AI/gasbench/main"
+    "/src/gasbench/dataset/configs"
+)
+GASBENCH_CONFIG_CACHE = CACHE_DIR / "gasbench_configs"
+
+# Local override file: place custom datasets here and they get merged with gasbench.
+# File format: same YAML as gasbench configs. See datasets.yaml.example.
+LOCAL_DATASETS_DIR = PROJECT_ROOT / "datasets"
 
 LABEL_MAP = {"real": 0, "synthetic": 1, "semisynthetic": 1}
 
@@ -34,12 +48,102 @@ VIDEO_COLUMNS = ("video", "video_bytes", "mp4", "clip", "video_file",
 AUDIO_COLUMNS = ("audio", "speech", "input_values", "waveform", "signal",
                  "sound", "wav", "recording")
 
+# Default per-dataset sample cap when downloading for training.
+# gasbench configs don't have max_samples — this is a training-only setting.
+DEFAULT_SAMPLES_PER_DATASET = 500
 
-def load_dataset_config(modality: str) -> dict:
-    """Load dataset YAML config for a modality."""
-    config_path = CONFIGS_DIR / f"{modality}_datasets.yaml"
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+
+# ---------------------------------------------------------------------------
+# Config loading — synced from gasbench
+# ---------------------------------------------------------------------------
+
+def _load_gasbench_config(modality: str, force_refresh: bool = False) -> dict:
+    """Fetch a single modality config from gasbench GitHub, with local cache."""
+    filename = f"{modality}_datasets.yaml"
+    cached_path = GASBENCH_CONFIG_CACHE / filename
+
+    if cached_path.exists() and not force_refresh:
+        with open(cached_path) as f:
+            return yaml.safe_load(f)
+
+    url = f"{GASBENCH_RAW_URL}/{filename}"
+    print(f"  Fetching {modality} dataset config from gasbench...")
+
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        config = yaml.safe_load(resp.text)
+
+        GASBENCH_CONFIG_CACHE.mkdir(parents=True, exist_ok=True)
+        cached_path.write_text(resp.text)
+        print(f"  Cached gasbench {modality} config ({len(config.get('datasets', []))} datasets)")
+        return config
+
+    except Exception as e:
+        if cached_path.exists():
+            print(f"  Warning: Could not fetch from gasbench ({e}), using cached config")
+            with open(cached_path) as f:
+                return yaml.safe_load(f)
+        raise RuntimeError(
+            f"Cannot load {modality} dataset config: {e}\n"
+            f"Ensure you have internet access, or manually place the config at:\n"
+            f"  {cached_path}"
+        ) from e
+
+
+def _load_local_datasets(modality: str) -> list[dict]:
+    """
+    Load custom datasets from the local datasets/ directory.
+
+    Looks for datasets/{modality}.yaml (e.g. datasets/image.yaml).
+    Returns empty list if no local overrides exist.
+    """
+    local_path = LOCAL_DATASETS_DIR / f"{modality}.yaml"
+    if not local_path.exists():
+        return []
+
+    with open(local_path) as f:
+        config = yaml.safe_load(f)
+
+    datasets = config.get("datasets", [])
+    if datasets:
+        print(f"  Loaded {len(datasets)} custom {modality} datasets from {local_path}")
+    return datasets
+
+
+def load_dataset_config(modality: str, force_refresh: bool = False) -> dict:
+    """
+    Load merged dataset config: gasbench (upstream) + local overrides.
+
+    Gasbench configs are the source of truth for competition datasets.
+    Local datasets from datasets/{modality}.yaml are appended on top,
+    letting developers add their own training data without forking gasbench.
+
+    Local datasets with the same 'name' as a gasbench dataset replace
+    the upstream entry (useful for overriding settings).
+    """
+    config = _load_gasbench_config(modality, force_refresh=force_refresh)
+    local_datasets = _load_local_datasets(modality)
+
+    if local_datasets:
+        existing_names = {d["name"] for d in config.get("datasets", [])}
+        for ds in local_datasets:
+            if ds["name"] in existing_names:
+                config["datasets"] = [
+                    ds if d["name"] == ds["name"] else d
+                    for d in config["datasets"]
+                ]
+            else:
+                config["datasets"].append(ds)
+
+    return config
+
+
+def refresh_configs():
+    """Force re-fetch all configs from gasbench."""
+    for modality in ("image", "video", "audio"):
+        _load_gasbench_config(modality, force_refresh=True)
+    print("All configs refreshed from gasbench.")
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +154,7 @@ def download_and_cache_dataset(
     dataset_name: str,
     hf_path: str,
     modality: str,
-    max_samples: int = 1000,
+    max_samples: int = DEFAULT_SAMPLES_PER_DATASET,
     split: str = "train",
     include_paths: Optional[list[str]] = None,
     exclude_paths: Optional[list[str]] = None,
@@ -79,7 +183,6 @@ def download_and_cache_dataset(
             try:
                 if try_split is None:
                     ds = load_dataset(hf_path, **kwargs)
-                    # Take first available split from the IterableDatasetDict
                     if hasattr(ds, "keys"):
                         first_key = next(iter(ds.keys()))
                         ds = ds[first_key]
@@ -99,7 +202,6 @@ def download_and_cache_dataset(
             if saved >= max_samples:
                 break
 
-            # Apply include/exclude path filtering on row metadata
             if include_paths or exclude_paths:
                 row_path = _extract_path_hint(item)
                 if row_path:
@@ -147,19 +249,20 @@ def _extract_path_hint(item: dict) -> Optional[str]:
 def download_all_datasets(
     modality: str,
     max_workers: int = 4,
+    max_samples_per_dataset: int = DEFAULT_SAMPLES_PER_DATASET,
     progress: bool = True,
 ) -> dict[str, int]:
     """
     Download all datasets for a modality using concurrent workers.
 
-    Returns dict mapping dataset name to number of cached samples.
+    Uses the gasbench dataset config as the source of truth.
     """
     config = load_dataset_config(modality)
     datasets_cfg = config["datasets"]
 
     if progress:
         print(f"\nDownloading {len(datasets_cfg)} {modality} datasets "
-              f"(up to {max_workers} concurrent)...")
+              f"(up to {max_workers} concurrent, max {max_samples_per_dataset}/dataset)...")
         print("=" * 60)
 
     results = {}
@@ -171,12 +274,11 @@ def download_all_datasets(
             dataset_name=name,
             hf_path=ds_cfg["path"],
             modality=modality,
-            max_samples=ds_cfg.get("max_samples", 1000),
+            max_samples=max_samples_per_dataset,
             include_paths=ds_cfg.get("include_paths"),
             exclude_paths=ds_cfg.get("exclude_paths"),
         )
         elapsed = time.time() - t0
-        # Count actual cached files
         n = _count_media_files(cache_path, modality)
         return name, n, elapsed
 
@@ -225,17 +327,14 @@ def _modality_extensions(modality: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _cache_image_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    """Cache a single image sample. Returns True on success."""
     img = None
     for key in IMAGE_COLUMNS:
         val = item.get(key)
         if val is not None:
             img = val
             break
-
     if img is None:
         return False
-
     try:
         out = cache_path / f"{idx:06d}.png"
         if isinstance(img, Image.Image):
@@ -248,7 +347,6 @@ def _cache_image_sample(item: dict, cache_path: Path, idx: int) -> bool:
             Image.open(io.BytesIO(img["bytes"])).convert("RGB").save(out)
             return True
         elif isinstance(img, dict) and "path" in img:
-            # Some datasets give a local path instead of bytes
             Image.open(img["path"]).convert("RGB").save(out)
             return True
     except Exception:
@@ -257,17 +355,14 @@ def _cache_image_sample(item: dict, cache_path: Path, idx: int) -> bool:
 
 
 def _cache_video_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    """Cache a single video sample as raw bytes. Returns True on success."""
     video = None
     for key in VIDEO_COLUMNS:
         val = item.get(key)
         if val is not None:
             video = val
             break
-
     if video is None:
         return False
-
     try:
         out = cache_path / f"{idx:06d}.mp4"
         if isinstance(video, bytes):
@@ -286,17 +381,14 @@ def _cache_video_sample(item: dict, cache_path: Path, idx: int) -> bool:
 
 
 def _cache_audio_sample(item: dict, cache_path: Path, idx: int) -> bool:
-    """Cache a single audio sample. Returns True on success."""
     audio = None
     for key in AUDIO_COLUMNS:
         val = item.get(key)
         if val is not None:
             audio = val
             break
-
     if audio is None:
         return False
-
     try:
         if isinstance(audio, dict) and "array" in audio:
             arr = np.array(audio["array"], dtype=np.float32)
@@ -324,14 +416,7 @@ def _cache_audio_sample(item: dict, cache_path: Path, idx: int) -> bool:
 # ---------------------------------------------------------------------------
 
 class ImageDeepfakeDataset(Dataset):
-    """Binary classification dataset for image deepfake detection."""
-
-    def __init__(
-        self,
-        samples: list[tuple[Path, int]],
-        target_size: tuple[int, int] = (224, 224),
-        augment_level: int = 0,
-    ):
+    def __init__(self, samples, target_size=(224, 224), augment_level=0):
         self.samples = samples
         self.target_size = target_size
         self.augment_level = augment_level
@@ -345,28 +430,17 @@ class ImageDeepfakeDataset(Dataset):
             img = np.array(Image.open(path).convert("RGB"))
         except Exception:
             img = np.zeros((self.target_size[0], self.target_size[1], 3), dtype=np.uint8)
-
         from dfresearch.transforms import resize_image, apply_random_augmentations, random_horizontal_flip
-
         img = resize_image(img, self.target_size)
         if self.augment_level > 0:
             img = apply_random_augmentations(img, level=self.augment_level)
             img = random_horizontal_flip(img)
-
-        tensor = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)  # [3, H, W] uint8
+        tensor = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)
         return tensor, label
 
 
 class VideoDeepfakeDataset(Dataset):
-    """Binary classification dataset for video deepfake detection."""
-
-    def __init__(
-        self,
-        samples: list[tuple[Path, int]],
-        target_size: tuple[int, int] = (224, 224),
-        num_frames: int = 16,
-        augment_level: int = 0,
-    ):
+    def __init__(self, samples, target_size=(224, 224), num_frames=16, augment_level=0):
         self.samples = samples
         self.target_size = target_size
         self.num_frames = num_frames
@@ -377,52 +451,35 @@ class VideoDeepfakeDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]
-
         try:
             from decord import VideoReader, cpu
             vr = VideoReader(str(path), ctx=cpu(0))
             total = len(vr)
-
             if total >= self.num_frames:
                 indices = np.linspace(0, total - 1, self.num_frames, dtype=int)
             else:
                 indices = list(range(total)) + [total - 1] * (self.num_frames - total)
-
-            frames = vr.get_batch(indices).asnumpy()  # [T, H, W, C] uint8
+            frames = vr.get_batch(indices).asnumpy()
         except Exception:
             frames = np.zeros(
-                (self.num_frames, self.target_size[0], self.target_size[1], 3),
-                dtype=np.uint8,
-            )
-
+                (self.num_frames, self.target_size[0], self.target_size[1], 3), dtype=np.uint8)
         from dfresearch.transforms import resize_image, apply_random_augmentations
-
         processed = []
         for i in range(min(frames.shape[0], self.num_frames)):
             frame = resize_image(frames[i], self.target_size)
             if self.augment_level > 0:
                 frame = apply_random_augmentations(frame, level=self.augment_level)
             processed.append(frame)
-
-        # Pad if we got fewer frames than expected
         while len(processed) < self.num_frames:
             processed.append(processed[-1] if processed else
                              np.zeros((self.target_size[0], self.target_size[1], 3), dtype=np.uint8))
-
-        frames_arr = np.stack(processed)  # [T, H, W, C]
+        frames_arr = np.stack(processed)
         tensor = torch.from_numpy(np.ascontiguousarray(frames_arr)).permute(0, 3, 1, 2)
         return tensor, label
 
 
 class AudioDeepfakeDataset(Dataset):
-    """Binary classification dataset for audio deepfake detection."""
-
-    def __init__(
-        self,
-        samples: list[tuple[Path, int]],
-        sample_rate: int = 16000,
-        duration_seconds: float = 6.0,
-    ):
+    def __init__(self, samples, sample_rate=16000, duration_seconds=6.0):
         self.samples = samples
         self.sample_rate = sample_rate
         self.target_length = int(sample_rate * duration_seconds)
@@ -432,7 +489,6 @@ class AudioDeepfakeDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.samples[idx]
-
         try:
             if path.suffix == ".npz":
                 data = np.load(path)
@@ -441,27 +497,21 @@ class AudioDeepfakeDataset(Dataset):
             else:
                 import soundfile as sf
                 waveform, sr = sf.read(str(path), dtype="float32")
-
             if waveform.ndim > 1:
                 waveform = waveform.mean(axis=-1)
-
             if sr != self.sample_rate:
                 import librosa
                 waveform = librosa.resample(waveform, orig_sr=sr, target_sr=self.sample_rate)
-
         except Exception:
             waveform = np.zeros(self.target_length, dtype=np.float32)
-
-        # Pad or crop to target length
         if len(waveform) > self.target_length:
             start = random.randint(0, len(waveform) - self.target_length)
             waveform = waveform[start : start + self.target_length]
         elif len(waveform) < self.target_length:
             pad = self.target_length - len(waveform)
             waveform = np.pad(waveform, (0, pad), mode="constant")
-
         waveform = np.clip(waveform, -1.0, 1.0)
-        tensor = torch.from_numpy(waveform)  # [96000] float32
+        tensor = torch.from_numpy(waveform)
         return tensor, label
 
 
@@ -478,8 +528,8 @@ def gather_samples(
     """
     Gather all cached samples for a modality with labels.
 
-    Uses a fixed seed for reproducible train/val splits.
-    Applies class balancing before splitting so both train and val are balanced.
+    Uses gasbench configs as the dataset registry.
+    Applies class balancing and reproducible train/val splits.
     """
     config = load_dataset_config(modality)
     real_samples = []
@@ -506,17 +556,14 @@ def gather_samples(
             else:
                 fake_samples.append((f, label))
 
-    # Deterministic shuffle for reproducible splits
     rng = random.Random(seed)
     rng.shuffle(real_samples)
     rng.shuffle(fake_samples)
 
-    # Apply per-class cap
     if max_per_class is not None:
         real_samples = real_samples[:max_per_class]
         fake_samples = fake_samples[:max_per_class]
 
-    # Split each class independently to maintain balance in both splits
     def _split(samples):
         n = len(samples)
         split_idx = int(0.8 * n)
@@ -556,23 +603,17 @@ def make_dataloader(
 
     if modality == "image":
         dataset = ImageDeepfakeDataset(
-            samples,
-            target_size=target_size,
-            augment_level=augment_level if split == "train" else 0,
-        )
+            samples, target_size=target_size,
+            augment_level=augment_level if split == "train" else 0)
     elif modality == "video":
         dataset = VideoDeepfakeDataset(
-            samples,
-            target_size=target_size,
-            num_frames=num_frames,
-            augment_level=augment_level if split == "train" else 0,
-        )
+            samples, target_size=target_size, num_frames=num_frames,
+            augment_level=augment_level if split == "train" else 0)
     elif modality == "audio":
         dataset = AudioDeepfakeDataset(samples)
     else:
         raise ValueError(f"Unknown modality: {modality}")
 
-    # Don't drop_last if it would yield zero batches
     use_drop_last = (split == "train") and (len(dataset) > batch_size)
 
     return DataLoader(

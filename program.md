@@ -21,7 +21,7 @@ To set up a new experiment run, work with the user to:
    - `src/dfresearch/models/` — baseline model implementations.
    - `src/dfresearch/data.py` — data loading pipeline.
    - `src/dfresearch/transforms.py` — augmentation pipeline.
-4. **Verify data exists**: Check that `~/.cache/dfresearch/datasets/{modality}/` contains cached data. If not, tell the human to run `uv run prepare.py --modality {modality}`.
+4. **Verify data exists**: Check that `~/.cache/dfresearch/datasets/{modality}/` contains cached data. If not, tell the human to run `uv run prepare.py --modality {modality}`. Dataset configs are auto-synced from [gasbench](https://github.com/BitMind-AI/gasbench/tree/main/src/gasbench/dataset/configs) — no local config files to maintain.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -38,11 +38,13 @@ uv run train_audio.py > run.log 2>&1    # for audio experiments
 ```
 
 **What you CAN do:**
+
 - Modify the training script for the chosen modality (`train_image.py`, `train_video.py`, or `train_audio.py`). Everything is fair game: model choice, architecture changes, optimizer, hyperparameters, batch size, augmentation level, etc.
 - Modify model files in `src/dfresearch/models/` — add new architectures, change existing ones, modify forward passes, add layers, etc.
 - Modify `src/dfresearch/transforms.py` to add or tweak augmentations.
 
 **What you CANNOT do:**
+
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation metrics and constants.
 - Modify `src/dfresearch/data.py`. The data pipeline is fixed.
 - Modify `evaluate.py` or `export.py`. These are stable tooling scripts.
@@ -61,7 +63,7 @@ uv run train_audio.py > run.log 2>&1    # for audio experiments
 
 Once the script finishes it prints a summary like this:
 
-```
+```bash
 ---
 model:            efficientnet-b4
 sn34_score:       0.723456
@@ -91,8 +93,8 @@ When an experiment is done, log it to `results.tsv` (tab-separated).
 
 The TSV has a header row and 6 columns:
 
-```
-commit	sn34_score	accuracy	memory_gb	status	description
+```bash
+commit sn34_score accuracy memory_gb status description
 ```
 
 1. git commit hash (short, 7 chars)
@@ -104,12 +106,12 @@ commit	sn34_score	accuracy	memory_gb	status	description
 
 Example:
 
-```
-commit	sn34_score	accuracy	memory_gb	status	description
-a1b2c3d	0.723456	0.856000	12.1	keep	baseline efficientnet-b4
-b2c3d4e	0.741230	0.872000	12.3	keep	increase LR to 3e-4 and augment_level=3
-c3d4e5f	0.718000	0.845000	12.1	discard	switch to clip-vit-l14 (worse on this data size)
-d4e5f6g	0.000000	0.000000	0.0	crash	double batch size (OOM)
+```bash
+commit sn34_score accuracy memory_gb status description
+a1b2c3d 0.723456 0.856000 12.1 keep baseline efficientnet-b4
+b2c3d4e 0.741230 0.872000 12.3 keep increase LR to 3e-4 and augment_level=3
+c3d4e5f 0.718000 0.845000 12.1 discard switch to clip-vit-l14 (worse on this data size)
+d4e5f6g 0.000000 0.000000 0.0 crash double batch size (OOM)
 ```
 
 ## The experiment loop
@@ -129,6 +131,7 @@ LOOP FOREVER:
 ## Experiment ideas (starting points)
 
 ### Image
+
 - Switch between efficientnet-b4 and clip-vit-l14, compare baselines
 - Try different learning rates: 5e-5, 1e-4, 3e-4, 5e-4
 - Increase augment_level (more aggressive data augmentation)
@@ -140,6 +143,7 @@ LOOP FOREVER:
 - Try focal loss instead of cross-entropy
 
 ### Video
+
 - Switch between r3d-18 and videomae
 - Increase num_frames (more temporal context)
 - Try different frame sampling strategies
@@ -148,6 +152,7 @@ LOOP FOREVER:
 - Experiment with different augmentation levels per frame
 
 ### Audio
+
 - Switch between wav2vec2 and ast
 - Try unfreezing the feature encoder (FREEZE_FEATURE_ENCODER = False)
 - Experiment with larger wav2vec2 models (wav2vec2-large)

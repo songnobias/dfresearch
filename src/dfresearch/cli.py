@@ -20,6 +20,8 @@ def main():
     prep.add_argument("--modality", choices=["image", "video", "audio", "all"], default="all")
     prep.add_argument("--verify", action="store_true")
     prep.add_argument("--workers", type=int, default=4)
+    prep.add_argument("--max-samples", type=int, default=500)
+    prep.add_argument("--refresh-configs", action="store_true")
 
     # train
     train = subparsers.add_parser("train", help="Run training")
@@ -47,9 +49,12 @@ def main():
 
     if args.command == "prepare":
         cmd = [sys.executable, str(PROJECT_ROOT / "prepare.py"),
-               "--modality", args.modality, "--workers", str(args.workers)]
+               "--modality", args.modality, "--workers", str(args.workers),
+               "--max-samples", str(args.max_samples)]
         if args.verify:
             cmd.append("--verify")
+        if args.refresh_configs:
+            cmd.append("--refresh-configs")
         subprocess.run(cmd, cwd=str(PROJECT_ROOT))
 
     elif args.command == "train":

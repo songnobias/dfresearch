@@ -152,10 +152,13 @@ def evaluate_model(model, dataloader, device="cuda") -> dict:
 # Data download
 # ──────────────────────────────────────────────────────────────────────────────
 
-def download_datasets(modality: str, max_workers: int = 4):
+def download_datasets(modality: str, max_workers: int = 4, max_samples: int = 500):
     """Download and cache all datasets for a modality using concurrent workers."""
     from dfresearch.data import download_all_datasets
-    download_all_datasets(modality, max_workers=max_workers, progress=True)
+    download_all_datasets(
+        modality, max_workers=max_workers,
+        max_samples_per_dataset=max_samples, progress=True,
+    )
 
 
 def verify_cache(modality: str):
@@ -227,7 +230,23 @@ def main():
         default=4,
         help="Number of concurrent download workers (default: 4)",
     )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=500,
+        help="Max samples to download per dataset (default: 500)",
+    )
+    parser.add_argument(
+        "--refresh-configs",
+        action="store_true",
+        help="Force re-fetch dataset configs from gasbench GitHub",
+    )
     args = parser.parse_args()
+
+    if args.refresh_configs:
+        from dfresearch.data import refresh_configs
+        refresh_configs()
+        return
 
     modalities = ["image", "video", "audio"] if args.modality == "all" else [args.modality]
 
@@ -235,7 +254,7 @@ def main():
         if args.verify:
             verify_cache(mod)
         else:
-            download_datasets(mod, max_workers=args.workers)
+            download_datasets(mod, max_workers=args.workers, max_samples=args.max_samples)
 
 
 if __name__ == "__main__":
