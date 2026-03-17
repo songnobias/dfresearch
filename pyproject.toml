@@ -44,7 +44,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv.sources]
-gasbench = { path = "../gasbench", editable = true }
+gasbench = { git = "https://github.com/BitMind-AI/gasbench.git", branch = "main" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
