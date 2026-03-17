@@ -24,11 +24,19 @@ try:
 except ImportError:
     pass
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import yaml
+
+try:
+    import wandb
+    WANDB_AVAILABLE = wandb.api.api_key is not None
+except Exception:
+    wandb = None
+    WANDB_AVAILABLE = False
 
 from prepare import (
     TIME_BUDGET,
@@ -113,6 +121,25 @@ def main():
     amp_enabled = USE_AMP and device == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
+    # ── W&B init ──
+    if WANDB_AVAILABLE:
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "dfresearch"),
+            config={
+                "modality": "video", "model": args.model,
+                "lr": args.lr, "batch_size": args.batch_size,
+                "time_budget": args.time_budget, "augment_level": AUGMENT_LEVEL,
+                "num_frames": NUM_FRAMES, "warmup_steps": WARMUP_STEPS,
+                "grad_accum": GRAD_ACCUM_STEPS, "weight_decay": WEIGHT_DECAY,
+                "num_params_M": round(num_params / 1e6, 1),
+                "train_samples": len(train_loader.dataset),
+                "val_samples": len(val_loader.dataset),
+            },
+            tags=["video", args.model],
+            reinit=True,
+        )
+        print(f"W&B: logging to {wandb.run.url}", flush=True)
+
     # ── Training loop ──
     from tqdm import tqdm
 
@@ -181,6 +208,8 @@ def main():
             avg_loss = epoch_loss / epoch_steps
             lr = optimizer.param_groups[0]["lr"]
             print(f"Epoch {epoch:<4d} | loss={avg_loss:.4f} | lr={lr:.1e} | step={step} | {elapsed:.0f}s/{budget}s", flush=True)
+            if WANDB_AVAILABLE:
+                wandb.log({"train/loss": avg_loss, "train/lr": lr, "train/epoch": epoch, "train/step": step})
 
     training_seconds = time.time() - t_start
 
@@ -213,6 +242,12 @@ def main():
     print(f"batch_size:       {args.batch_size}")
     print(f"learning_rate:    {args.lr}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
+
+    if WANDB_AVAILABLE:
+        wandb.log({"eval/sn34_score": metrics["sn34_score"], "eval/accuracy": metrics["accuracy"],
+                    "eval/mcc": metrics["mcc"], "eval/brier": metrics["brier"],
+                    "system/peak_vram_mb": peak_vram_mb, "system/training_seconds": training_seconds})
+        wandb.summary.update({"sn34_score": metrics["sn34_score"], "accuracy": metrics["accuracy"]})
 
     from safetensors.torch import save_file
     from pathlib import Path
@@ -253,6 +288,9 @@ def main():
         "augment_level": AUGMENT_LEVEL,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
+
+    if WANDB_AVAILABLE:
+        wandb.finish()
 
 
 if __name__ == "__main__":

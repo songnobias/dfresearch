@@ -24,11 +24,19 @@ try:
 except ImportError:
     pass
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import yaml
+
+try:
+    import wandb
+    WANDB_AVAILABLE = wandb.api.api_key is not None
+except Exception:
+    wandb = None
+    WANDB_AVAILABLE = False
 
 from prepare import (
     TIME_BUDGET,
@@ -117,27 +125,56 @@ def main():
     amp_enabled = USE_AMP and device == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
+    # ── W&B init ──
+    if WANDB_AVAILABLE:
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "dfresearch"),
+            config={
+                "modality": "image", "model": args.model,
+                "lr": args.lr, "batch_size": args.batch_size,
+                "time_budget": args.time_budget, "augment_level": AUGMENT_LEVEL,
+                "warmup_steps": WARMUP_STEPS, "grad_accum": GRAD_ACCUM_STEPS,
+                "dropout": DROPOUT, "freeze_backbone": FREEZE_BACKBONE,
+                "weight_decay": WEIGHT_DECAY, "max_per_class": MAX_PER_CLASS,
+                "num_params_M": round(num_params / 1e6, 1),
+                "num_trainable_M": round(num_trainable / 1e6, 1),
+                "train_samples": len(train_loader.dataset),
+                "val_samples": len(val_loader.dataset),
+            },
+            tags=["image", args.model],
+            reinit=True,
+        )
+        print(f"W&B: logging to {wandb.run.url}", flush=True)
+
     # ── Training loop ──
+    from tqdm import tqdm
+
     model.train()
     step = 0
     epoch = 0
     total_loss = 0.0
     t_start = time.time()
+    budget = args.time_budget
+    is_tty = sys.stdout.isatty()
 
-    print(f"\nTraining for {args.time_budget}s time budget...", flush=True)
-    print("-" * 60, flush=True)
+    print(f"\nTraining for {budget}s budget...", flush=True)
 
-    while True:
+    time_up = False
+    while not time_up:
         epoch += 1
-        for batch_inputs, batch_labels in train_loader:
+        epoch_loss = 0.0
+        epoch_steps = 0
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not is_tty, leave=False, ncols=100)
+        for batch_inputs, batch_labels in pbar:
             elapsed = time.time() - t_start
-            if elapsed >= args.time_budget:
+            if elapsed >= budget:
+                time_up = True
                 break
 
             batch_inputs = batch_inputs.to(device, non_blocking=True)
             batch_labels = batch_labels.to(device, non_blocking=True)
 
-            # LR warmup
             if WARMUP_STEPS > 0 and step < WARMUP_STEPS:
                 lr_scale = (step + 1) / WARMUP_STEPS
                 for pg in optimizer.param_groups:
@@ -148,7 +185,6 @@ def main():
                 loss = F.cross_entropy(logits, batch_labels)
                 loss = loss / GRAD_ACCUM_STEPS
 
-            # Fast fail on NaN
             if torch.isnan(loss):
                 print("ERROR: NaN loss detected, aborting.")
                 sys.exit(1)
@@ -162,17 +198,24 @@ def main():
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            total_loss += loss.item() * GRAD_ACCUM_STEPS
+            batch_loss = loss.item() * GRAD_ACCUM_STEPS
+            total_loss += batch_loss
+            epoch_loss += batch_loss
+            epoch_steps += 1
             step += 1
 
-            if step % 10 == 0 or step <= 5:
-                avg_loss = total_loss / max(step, 1)
-                print(f"  step {step:>5d} | loss {avg_loss:.4f} | elapsed {elapsed:.0f}s", flush=True)
+            lr = optimizer.param_groups[0]["lr"]
+            remaining = max(0, budget - elapsed)
+            pbar.set_postfix_str(f"loss={epoch_loss / epoch_steps:.4f} lr={lr:.1e} rem={remaining:.0f}s")
+        pbar.close()
 
         elapsed = time.time() - t_start
-        print(f"  epoch {epoch:>3d} done | steps {step} | elapsed {elapsed:.0f}s", flush=True)
-        if elapsed >= args.time_budget:
-            break
+        if epoch_steps > 0:
+            avg_loss = epoch_loss / epoch_steps
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"Epoch {epoch:<4d} | loss={avg_loss:.4f} | lr={lr:.1e} | step={step} | {elapsed:.0f}s/{budget}s", flush=True)
+            if WANDB_AVAILABLE:
+                wandb.log({"train/loss": avg_loss, "train/lr": lr, "train/epoch": epoch, "train/step": step})
 
     training_seconds = time.time() - t_start
 
@@ -204,6 +247,20 @@ def main():
     print(f"batch_size:       {args.batch_size}")
     print(f"learning_rate:    {args.lr}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
+
+    if WANDB_AVAILABLE:
+        wandb.log({
+            "eval/sn34_score": metrics["sn34_score"],
+            "eval/accuracy": metrics["accuracy"],
+            "eval/mcc": metrics["mcc"],
+            "eval/brier": metrics["brier"],
+            "system/peak_vram_mb": peak_vram_mb,
+            "system/training_seconds": training_seconds,
+        })
+        wandb.summary.update({
+            "sn34_score": metrics["sn34_score"],
+            "accuracy": metrics["accuracy"],
+        })
 
     # Save submission-ready checkpoint directory
     from safetensors.torch import save_file
@@ -245,6 +302,9 @@ def main():
         "augment_level": AUGMENT_LEVEL,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
+
+    if WANDB_AVAILABLE:
+        wandb.finish()
 
 
 if __name__ == "__main__":
