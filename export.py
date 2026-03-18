@@ -28,14 +28,17 @@ MODEL_MODULES = {
     "image": {
         "efficientnet-b4": "dfresearch.models.image.efficientnet",
         "clip-vit-l14": "dfresearch.models.image.clip_vit",
+        "smogy-swin": "dfresearch.models.image.smogy_swin",
     },
     "video": {
         "r3d-18": "dfresearch.models.video.r3d",
         "videomae": "dfresearch.models.video.videomae",
+        "hiera": "dfresearch.models.video.hiera",
     },
     "audio": {
         "wav2vec2": "dfresearch.models.audio.wav2vec2",
         "ast": "dfresearch.models.audio.ast_model",
+        "wavlm": "dfresearch.models.audio.wavlm",
     },
 }
 

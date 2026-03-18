@@ -9,9 +9,10 @@ Input:  [B, 96000] float32 [-1, 1]  (16kHz, 6 seconds)
 Output: [B, 2] logits [real, synthetic]
 """
 
+import math
+
 import torch
 import torch.nn as nn
-import torchaudio
 from safetensors.torch import load_file
 
 
@@ -26,16 +27,21 @@ class ASTDetector(nn.Module):
         dropout: float = 0.2,
         n_mels: int = 128,
         sample_rate: int = 16000,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        target_length: int = 1024,
     ):
         super().__init__()
 
         self.n_mels = n_mels
         self.sample_rate = sample_rate
+        self.target_length = target_length
 
+        import torchaudio
         self.mel_transform = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
-            n_fft=1024,
-            hop_length=160,
+            n_fft=n_fft,
+            hop_length=hop_length,
             n_mels=n_mels,
             power=2.0,
         )
@@ -50,12 +56,12 @@ class ASTDetector(nn.Module):
                 num_hidden_layers=12,
                 num_attention_heads=12,
                 intermediate_size=3072,
-                max_length=1024,
+                max_length=target_length,
                 num_mel_bins=n_mels,
             )
             self.encoder = ASTModel(config)
 
-        self.feat_dim = self.encoder.config.hidden_size  # 768
+        self.feat_dim = self.encoder.config.hidden_size
 
         self.head = nn.Sequential(
             nn.LayerNorm(self.feat_dim),
@@ -65,19 +71,28 @@ class ASTDetector(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, 96000] float32 [-1, 1]
+        mel = self.mel_transform(x)                        # [B, n_mels, time]
+        mel = (mel + 1e-8).log()                           # log-mel
+        mel = (mel - mel.mean()) / (mel.std() + 1e-8)
 
-        # Compute mel spectrogram
-        mel = self.mel_transform(x)              # [B, n_mels, time]
-        mel = (mel + 1e-8).log()                 # log-mel
-        mel = (mel - mel.mean()) / (mel.std() + 1e-8)  # normalize
+        # AST expects input_values: [B, max_length, n_mels]
+        mel = mel.permute(0, 2, 1)                         # [B, time, n_mels]
 
-        # AST expects input_values: [B, time, n_mels]
-        mel = mel.permute(0, 2, 1)               # [B, time, n_mels]
+        # Pad or truncate to fixed target_length so it matches position embeddings
+        time_steps = mel.shape[1]
+        if time_steps > self.target_length:
+            mel = mel[:, :self.target_length, :]
+        elif time_steps < self.target_length:
+            pad = torch.zeros(
+                mel.shape[0], self.target_length - time_steps, mel.shape[2],
+                device=mel.device, dtype=mel.dtype,
+            )
+            mel = torch.cat([mel, pad], dim=1)
 
         outputs = self.encoder(input_values=mel)
-        pooled = outputs.pooler_output            # [B, 768]
+        pooled = outputs.pooler_output                     # [B, 768]
 
-        return self.head(pooled)                  # [B, 2]
+        return self.head(pooled)                           # [B, 2]
 
 
 def load_model(weights_path: str, num_classes: int = 2) -> nn.Module:

@@ -8,9 +8,12 @@ architecture tweaks, batch size, learning rate schedule, etc.
 
 The goal: maximize sn34_score on the validation set within the time budget.
 
+Available models: efficientnet-b4, clip-vit-l14, smogy-swin
+
 Usage:
     uv run train_image.py
     uv run train_image.py --model clip-vit-l14
+    uv run train_image.py --model smogy-swin
     uv run train_image.py > run.log 2>&1
 """
 

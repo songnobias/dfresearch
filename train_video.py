@@ -8,9 +8,12 @@ frame sampling, temporal aggregation, architecture tweaks, etc.
 
 The goal: maximize sn34_score on the validation set within the time budget.
 
+Available models: r3d-18, videomae, hiera
+
 Usage:
     uv run train_video.py
     uv run train_video.py --model videomae
+    uv run train_video.py --model hiera
     uv run train_video.py > run.log 2>&1
 """
 

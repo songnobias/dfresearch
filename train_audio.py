@@ -8,9 +8,12 @@ spectrogram parameters, pooling strategy, architecture tweaks, etc.
 
 The goal: maximize sn34_score on the validation set within the time budget.
 
+Available models: wav2vec2, ast, wavlm
+
 Usage:
     uv run train_audio.py
     uv run train_audio.py --model ast
+    uv run train_audio.py --model wavlm
     uv run train_audio.py > run.log 2>&1
 """
 

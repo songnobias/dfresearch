@@ -160,40 +160,46 @@ The agent will create a branch, establish a baseline, and start experimenting au
 
 ## Baseline models
 
-### Image (2 baselines)
+### Image (3 baselines)
 
-| Model               | Params | Source                                                                                | Description                                                                                                                                                                                                                         |
-| ------------------- | ------ | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **EfficientNet-B4** | 19M    | [timm](https://github.com/huggingface/pytorch-image-models)                           | ImageNet-pretrained CNN. The standard baseline from FaceForensics++ and DFDC challenge literature. Proven, efficient, well-understood.                                                                                              |
-| **CLIP ViT-L/14**   | 304M   | [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) | OpenAI's vision-language model. CLIP features generalize exceptionally well across unseen generators ([UniversalFakeDetect, CVPR 2023](https://arxiv.org/abs/2302.10174)). Fine-tune the vision encoder with a classification head. |
+| Model | Params | Source | Description |
+|---|---|---|---|
+| **EfficientNet-B4** | 19M | [timm](https://github.com/huggingface/pytorch-image-models) | ImageNet-pretrained CNN. Standard baseline from FaceForensics++ and DFDC challenge literature. Proven, efficient, well-understood. |
+| **CLIP ViT-L/14** | 304M | [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) | OpenAI's vision-language model. CLIP features generalize exceptionally well across unseen generators ([UniversalFakeDetect, CVPR 2023](https://arxiv.org/abs/2302.10174)). |
+| **SMOGY Swin** | 87M | [Smogy/SMOGY-Ai-images-detector](https://huggingface.co/Smogy/SMOGY-Ai-images-detector) | Swin Transformer already fine-tuned for AI-image detection (98.2% accuracy). Arrives pre-trained for the task, unlike other baselines. CC-BY-NC-4.0 license. |
 
-### Video (2 baselines)
+### Video (3 baselines)
 
-| Model        | Params | Source                                                                    | Description                                                                                                                     |
-| ------------ | ------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **R3D-18**   | 33M    | [torchvision](https://pytorch.org/vision/stable/models/video_resnet.html) | 3D ResNet-18 pretrained on Kinetics-400. 3D convolutions capture temporal artifacts between frames. Lightweight, fast to train. |
-| **VideoMAE** | 87M    | [MCG-NJU/videomae-base](https://huggingface.co/MCG-NJU/videomae-base)     | Self-supervised masked autoencoder pretrained on video. Strong spatiotemporal representations with excellent transfer learning. |
+| Model | Params | Source | Description |
+|---|---|---|---|
+| **R3D-18** | 33M | [torchvision](https://pytorch.org/vision/stable/models/video_resnet.html) | 3D ResNet-18 pretrained on Kinetics-400. 3D convolutions capture temporal artifacts between frames. Lightweight, fast to train. |
+| **VideoMAE** | 87M | [MCG-NJU/videomae-base](https://huggingface.co/MCG-NJU/videomae-base) | Self-supervised masked autoencoder pretrained on video. Strong spatiotemporal representations with excellent transfer learning. |
+| **Hiera** | 52M | [facebook/hiera-base-224-hf](https://huggingface.co/facebook/hiera-base-224-hf) | Meta's fast hierarchical ViT pretrained with MAE. Learns spatial biases through pretraining rather than hand-designed modules. Processes frames independently then pools temporally. |
 
-### Audio (2 baselines)
+### Audio (3 baselines)
 
-| Model        | Params | Source                                                                                                    | Description                                                                                                                                                     |
-| ------------ | ------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Wav2Vec2** | 95M    | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base)                                   | Self-supervised pretrained on 960h of speech. Dominant approach in ASVspoof challenges. Takes raw waveform input (16kHz, 6s).                                   |
-| **AST**      | 87M    | [MIT/ast-finetuned-audioset-10-10-0.4593](https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593) | Audio Spectrogram Transformer — applies ViT to mel-spectrograms. AudioSet pretrained. Different inductive bias from Wav2Vec2 (frequency-domain vs time-domain). |
+| Model | Params | Source | Description |
+|---|---|---|---|
+| **Wav2Vec2** | 95M | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base) | Self-supervised pretrained on 960h of speech. Dominant approach in ASVspoof challenges. Takes raw waveform input (16kHz, 6s). |
+| **AST** | 87M | [MIT/ast-finetuned-audioset-10-10-0.4593](https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593) | Audio Spectrogram Transformer — applies ViT to mel-spectrograms. AudioSet pretrained. Frequency-domain approach, complementary to Wav2Vec2. |
+| **WavLM** | 95M | [microsoft/wavlm-base-plus](https://huggingface.co/microsoft/wavlm-base-plus) | Microsoft's SSL model that [outperforms Wav2Vec2 on ASVspoof5](https://arxiv.org/html/2408.07414v1). Same raw waveform API, better pretrained representations. Drop-in upgrade. |
 
 ## Switching models
 
 Each training script defaults to one model. To switch:
 
 ```bash
-# Image: switch to CLIP
+# Image
 uv run train_image.py --model clip-vit-l14
+uv run train_image.py --model smogy-swin
 
-# Video: switch to VideoMAE
+# Video
 uv run train_video.py --model videomae
+uv run train_video.py --model hiera
 
-# Audio: switch to AST
+# Audio
 uv run train_audio.py --model ast
+uv run train_audio.py --model wavlm
 ```
 
 Or edit the `MODEL_NAME` constant at the top of the training script.
