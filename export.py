@@ -29,6 +29,7 @@ MODEL_MODULES = {
         "efficientnet-b4": "dfresearch.models.image.efficientnet",
         "clip-vit-l14": "dfresearch.models.image.clip_vit",
         "smogy-swin": "dfresearch.models.image.smogy_swin",
+        "convnext-base": "dfresearch.models.image.convnext",
     },
     "video": {
         "r3d-18": "dfresearch.models.video.r3d",

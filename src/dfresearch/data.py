@@ -18,10 +18,14 @@ from typing import Optional
 
 import numpy as np
 
-# Load .env if present (HF_TOKEN, CUDA_VISIBLE_DEVICES, etc.)
+# Load .env from dfresearch root (HF_TOKEN, CUDA_VISIBLE_DEVICES, etc.)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+
+    _DF_ROOT = Path(__file__).resolve().parent.parent.parent
+    load_dotenv(_DF_ROOT / ".env")
+    if os.environ.get("HF_TOKEN") and not os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
 except ImportError:
     pass
 import requests
@@ -172,7 +176,20 @@ def download_and_cache_dataset(
     marker = cache_path / ".download_complete"
 
     if marker.exists():
-        return cache_path
+        # Stale marker from a failed run (0 samples) would block forever — retry if empty.
+        ext = _modality_extensions(modality)
+        n_cached = (
+            sum(
+                1
+                for f in cache_path.iterdir()
+                if f.suffix.lower() in ext and not f.name.startswith(".")
+            )
+            if cache_path.exists()
+            else 0
+        )
+        if n_cached > 0:
+            return cache_path
+        marker.unlink(missing_ok=True)
 
     cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -231,7 +248,8 @@ def download_and_cache_dataset(
             except Exception:
                 continue
 
-        marker.touch()
+        if saved > 0:
+            marker.touch()
         print(f"  Cached {saved} samples for {dataset_name}")
     except Exception as e:
         print(f"  Warning: Could not download {dataset_name}: {e}")

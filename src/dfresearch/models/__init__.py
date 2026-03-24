@@ -7,6 +7,7 @@ _MODEL_PATHS = {
         "efficientnet-b4": ("dfresearch.models.image.efficientnet", "EfficientNetB4Detector"),
         "clip-vit-l14": ("dfresearch.models.image.clip_vit", "CLIPViTDetector"),
         "smogy-swin": ("dfresearch.models.image.smogy_swin", "SMOGYSwinDetector"),
+        "convnext-base": ("dfresearch.models.image.convnext", "ConvNeXtDetector"),
     },
     "video": {
         "r3d-18": ("dfresearch.models.video.r3d", "R3D18Detector"),

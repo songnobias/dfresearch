@@ -14,7 +14,19 @@ Usage:
 """
 
 import argparse
+import os
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    _ENV_PATH = Path(__file__).resolve().parent / ".env"
+    load_dotenv(_ENV_PATH)
+    # huggingface_hub also reads HUGGING_FACE_HUB_TOKEN
+    if os.environ.get("HF_TOKEN") and not os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
+except ImportError:
+    pass
 
 import numpy as np
 from sklearn.metrics import matthews_corrcoef, brier_score_loss, accuracy_score
