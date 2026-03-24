@@ -30,6 +30,8 @@ dependencies = [
     "soundfile>=0.12.0",
     "librosa>=0.10.0",
     "pyarrow>=15.0.0",
+    # Required by data.py download_and_cache_dataset (prepare.py); was missing → 0 samples.
+    "gasbench @ git+https://github.com/BitMind-AI/gasbench.git@095985dac77501fad7c71da4d61e92b1e7946bc6",
 ]
 
 [project.optional-dependencies]
@@ -44,3 +46,19 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
