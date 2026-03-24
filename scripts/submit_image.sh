@@ -8,6 +8,9 @@
 #   - bitmind-subnet installed (for gasbench + gascli)
 #   - Registered wallet/hotkey on SN34
 #
+# Optional env:
+#   BITMIND_SUBNET_ROOT  — root of bitmind-subnet (where .venv has gasbench/gascli) if not ../ from dfresearch
+#
 # Usage:
 #   ./scripts/submit_image.sh                           # full pipeline, default model
 #   ./scripts/submit_image.sh --model convnext-base     # pick architecture
@@ -19,7 +22,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DF_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SUBNET_ROOT="$(cd "${DF_ROOT}/.." && pwd)"
+# Default: dfresearch lives under bitmind-subnet/dfresearch. If you use submodules
+# (e.g. dfresearch next to gasbench), set: export BITMIND_SUBNET_ROOT=/path/to/bitmind-subnet
+SUBNET_ROOT="${BITMIND_SUBNET_ROOT:-$(cd "${DF_ROOT}/.." && pwd)}"
 
 # ── Defaults ──
 MODEL="efficientnet-b4"
