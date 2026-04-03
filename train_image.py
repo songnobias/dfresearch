@@ -52,11 +52,11 @@ from prepare import (
 # HYPERPARAMETERS — The agent tunes these
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "efficientnet-b4"       # "efficientnet-b4" or "clip-vit-l14"
-LEARNING_RATE = 1e-4
+MODEL_NAME = "clip-vit-l14"       # "efficientnet-b4" or "clip-vit-l14"
+LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 1e-4
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE  # 32
-AUGMENT_LEVEL = 2                      # 0=none, 1=basic, 2=medium, 3=hard
+AUGMENT_LEVEL = 3                      # 0=none, 1=basic, 2=medium, 3=hard
 MAX_PER_CLASS = 5000                   # samples per class for training
 WARMUP_STEPS = 100
 GRAD_ACCUM_STEPS = 1

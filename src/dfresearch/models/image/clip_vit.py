@@ -25,6 +25,7 @@ class CLIPViTDetector(nn.Module):
         self,
         num_classes: int = 2,
         pretrained: bool = True,
+        dropout: float = 0.2,
         freeze_backbone: bool = False,
         model_name: str = "openai/clip-vit-large-patch14",
     ):
@@ -53,7 +54,7 @@ class CLIPViTDetector(nn.Module):
 
         self.head = nn.Sequential(
             nn.LayerNorm(self.feat_dim),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout),
             nn.Linear(self.feat_dim, num_classes),
         )
 

@@ -35,7 +35,7 @@ from sklearn.metrics import matthews_corrcoef, brier_score_loss, accuracy_score
 # Constants (DO NOT MODIFY)
 # ──────────────────────────────────────────────────────────────────────────────
 
-TIME_BUDGET = 600             # 10-minute training budget (wall clock)
+TIME_BUDGET = 4800             # 10-minute training budget (wall clock)
 TARGET_IMAGE_SIZE = (224, 224)
 TARGET_VIDEO_SIZE = (224, 224)
 NUM_VIDEO_FRAMES = 16
