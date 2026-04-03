@@ -5,6 +5,7 @@ import importlib
 _MODEL_PATHS = {
     "image": {
         "efficientnet-b4": ("dfresearch.models.image.efficientnet", "EfficientNetB4Detector"),
+        "resnet-50": ("dfresearch.models.image.resnet50", "ResNet50Detector"),
         "clip-vit-l14": ("dfresearch.models.image.clip_vit", "CLIPViTDetector"),
         "smogy-swin": ("dfresearch.models.image.smogy_swin", "SMOGYSwinDetector"),
         "convnext-base": ("dfresearch.models.image.convnext", "ConvNeXtDetector"),

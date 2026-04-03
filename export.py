@@ -27,6 +27,7 @@ import yaml
 MODEL_MODULES = {
     "image": {
         "efficientnet-b4": "dfresearch.models.image.efficientnet",
+        "resnet-50": "dfresearch.models.image.resnet50",
         "clip-vit-l14": "dfresearch.models.image.clip_vit",
         "smogy-swin": "dfresearch.models.image.smogy_swin",
         "convnext-base": "dfresearch.models.image.convnext",
@@ -166,7 +167,7 @@ def main():
     parser.add_argument(
         "--model",
         required=True,
-        help="Model name (e.g., efficientnet-b4, clip-vit-l14, r3d-18, videomae, wav2vec2, ast)",
+        help="Model name (e.g., efficientnet-b4, resnet-50, clip-vit-l14, r3d-18, videomae, wav2vec2, ast)",
     )
     parser.add_argument(
         "--checkpoint-dir",
