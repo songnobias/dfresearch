@@ -35,3 +35,4 @@ datasets/audio.yaml
 *.swp
 *.swo
 .DS_Store
+.env.example

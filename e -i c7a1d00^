@@ -1,0 +1,15 @@
+[33m091ee06[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Enhance model initialization in __init__.py
+[33m5a39578[m Add .env.example to .gitignore
+[33m5dd5509[m Enhance training script with label smoothing and cosine decay options
+[33mee47878[m Add ResNet-50 model for image detection
+[33mc7a1d00[m Update model configurations and environment settings
+[33m7cca691[m Merge gasbench dependency fix; resolve pyproject/lock
+[33m1cfb65e[m fix(deps): add gasbench so prepare.py downloads work (was 0 samples)
+[33m7b45909[m[33m ([m[1;32mbackup/unpublished-work[m[33m)[m Add sync_env.sh at repo root for ./sync_env.sh without scripts path
+[33mb205c85[m scripts: sync_env.sh unset PyTorch index env vars; force UV_PROJECT for dfresearch
+[33mb772924[m scripts: add ensure_dfresearch_remote.sh for wrong origin (Bitmind vs dfresearch)
+[33mfdf95be[m fix(uv): explicit PyTorch cu128 index so markupsafe resolves from PyPI
+[33mb60c8eb[m submit_image: allow BITMIND_SUBNET_ROOT for non-nested layouts
+[33ma9fbb0e[m Add new ConvNeXt model and enhance environment loading
+[33m9f6451d[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Add 3 new baseline models and fix AST/torchaudio issues
+[33m0aec9ef[m release prep: git dependency for gasbench, add LICENSE
