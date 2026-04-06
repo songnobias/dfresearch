@@ -1,6 +1,7 @@
 """Baseline deepfake detection models for image, video, and audio modalities."""
 
 import importlib
+import inspect
 
 _MODEL_PATHS = {
     "image": {
@@ -43,7 +44,16 @@ def get_model(modality: str, name: str, **kwargs):
     if name not in _MODEL_PATHS[modality]:
         raise ValueError(f"Unknown {modality} model: {name}. Choose from {list(_MODEL_PATHS[modality])}")
     cls = _resolve(modality, name)
-    return cls(**kwargs)
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        return cls(**kwargs)
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return cls(**kwargs)
+    allowed = {k for k in params if k != "self"}
+    filtered = {k: v for k, v in kwargs.items() if k in allowed}
+    return cls(**filtered)
 
 
 def list_models(modality: str | None = None) -> dict[str, list[str]]:
