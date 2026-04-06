@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import math
 import time
 import sys
 
@@ -64,6 +65,8 @@ GRAD_ACCUM_STEPS = 1
 USE_AMP = True                         # mixed precision
 FREEZE_BACKBONE = False                # freeze pretrained backbone layers
 DROPOUT = 0.3
+LABEL_SMOOTHING = 0.05                 # cross-entropy smoothing; helps Brier / sn34_score
+ETA_MIN_LR_RATIO = 0.01              # cosine floor: final lr = base_lr * this (after warmup)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Training
@@ -75,6 +78,17 @@ def main():
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--time-budget", type=int, default=TIME_BUDGET)
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=LABEL_SMOOTHING,
+        help="Cross-entropy label smoothing (0 disables)",
+    )
+    parser.add_argument(
+        "--no-cosine-decay",
+        action="store_true",
+        help="Keep base LR after warmup instead of cosine decay to end of time budget",
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -140,6 +154,9 @@ def main():
                 "warmup_steps": WARMUP_STEPS, "grad_accum": GRAD_ACCUM_STEPS,
                 "dropout": DROPOUT, "freeze_backbone": FREEZE_BACKBONE,
                 "weight_decay": WEIGHT_DECAY, "max_per_class": MAX_PER_CLASS,
+                "label_smoothing": args.label_smoothing,
+                "cosine_decay": not args.no_cosine_decay,
+                "eta_min_lr_ratio": ETA_MIN_LR_RATIO,
                 "num_params_M": round(num_params / 1e6, 1),
                 "num_trainable_M": round(num_trainable / 1e6, 1),
                 "train_samples": len(train_loader.dataset),
@@ -162,8 +179,13 @@ def main():
     is_tty = sys.stdout.isatty()
 
     print(f"\nTraining for {budget}s budget...", flush=True)
+    if args.label_smoothing > 0:
+        print(f"Label smoothing: {args.label_smoothing}", flush=True)
+    print(f"LR schedule: warmup {WARMUP_STEPS} steps, then ", end="", flush=True)
+    print("cosine to end of budget" if not args.no_cosine_decay else "constant LR", flush=True)
 
     time_up = False
+    warmup_done_elapsed: float | None = None
     while not time_up:
         epoch += 1
         epoch_loss = 0.0
@@ -183,10 +205,23 @@ def main():
                 lr_scale = (step + 1) / WARMUP_STEPS
                 for pg in optimizer.param_groups:
                     pg["lr"] = args.lr * lr_scale
+            elif not args.no_cosine_decay:
+                if warmup_done_elapsed is None:
+                    warmup_done_elapsed = elapsed
+                span = max(budget - warmup_done_elapsed, 1e-6)
+                t_prog = min(1.0, (elapsed - warmup_done_elapsed) / span)
+                eta_min = args.lr * ETA_MIN_LR_RATIO
+                lr_cur = eta_min + (args.lr - eta_min) * 0.5 * (1.0 + math.cos(math.pi * t_prog))
+                for pg in optimizer.param_groups:
+                    pg["lr"] = lr_cur
+            else:
+                for pg in optimizer.param_groups:
+                    pg["lr"] = args.lr
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
                 logits = model(batch_inputs)
-                loss = F.cross_entropy(logits, batch_labels)
+                ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
+                loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
                 loss = loss / GRAD_ACCUM_STEPS
 
             if torch.isnan(loss):
@@ -250,6 +285,8 @@ def main():
     print(f"num_epochs:       {epoch}")
     print(f"batch_size:       {args.batch_size}")
     print(f"learning_rate:    {args.lr}")
+    print(f"label_smoothing:  {args.label_smoothing}")
+    print(f"cosine_decay:     {not args.no_cosine_decay}")
     print(f"augment_level:    {AUGMENT_LEVEL}")
 
     if WANDB_AVAILABLE:
@@ -303,6 +340,8 @@ def main():
         "num_params_M": round(num_params / 1e6, 1),
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
+        "label_smoothing": args.label_smoothing,
+        "cosine_decay": not args.no_cosine_decay,
         "augment_level": AUGMENT_LEVEL,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
