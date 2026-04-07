@@ -60,14 +60,18 @@ BACKBONE_LR_SCALE = 0.1           # backbone LR = LEARNING_RATE * 0.1 (prevents 
 WEIGHT_DECAY = 1e-2               # strong regularization improves holdout generalization
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE  # 32; reduce to 16 if OOM with CLIP
 AUGMENT_LEVEL = 3                 # 0=none, 1=basic, 2=medium, 3=hard
-MAX_PER_CLASS = 10000             # samples per class for training; more = better generalization
+MAX_PER_CLASS = 20000             # more diversity = better generalization on unseen generators
 WARMUP_STEPS = 200                # longer warmup stabilizes large ViT fine-tuning
 GRAD_ACCUM_STEPS = 1
 USE_AMP = True                    # mixed precision
 FREEZE_BACKBONE = False           # freeze pretrained backbone layers
 DROPOUT = 0.3
-LABEL_SMOOTHING = 0.10            # higher smoothing lowers overconfident outputs → better Brier
+LABEL_SMOOTHING = 0.15            # higher smoothing → less overconfident → lower Brier
 ETA_MIN_LR_RATIO = 0.001          # cosine floor: final lr = base_lr * this (after warmup)
+
+# ── Calibration / regularization ──────────────────────────────────────────────
+MIXUP_ALPHA = 0.2                 # Mixup beta distribution alpha; 0 disables mixup
+ENTROPY_LAMBDA = 0.005            # weight for entropy bonus (penalises overconfident logits)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -76,14 +80,12 @@ ETA_MIN_LR_RATIO = 0.001          # cosine floor: final lr = base_lr * this (aft
 
 def calibrate_temperature(model, val_loader, device, amp_enabled):
     """
-    Fit a scalar temperature T on the validation set to minimise NLL.
+    Find scalar temperature T that minimises Brier score on the validation set.
 
-    Calibrated probabilities lower the Brier score significantly because the
-    production sn34_score weights calibration with β=1.8 vs α=1.2 for MCC.
+    The production sn34_score uses brier_score = (0.25 - brier) / 0.25 raised to
+    β=1.8, so minimising Brier directly is the correct objective — not NLL.
 
-    After finding T, we divide the final linear layer's weight and bias by T
-    so the calibration is baked into the saved safetensors — no model.py changes
-    needed.
+    T is baked into the final linear layer so the model is self-contained.
     """
     model.eval()
     logits_list, labels_list = [], []
@@ -96,25 +98,43 @@ def calibrate_temperature(model, val_loader, device, amp_enabled):
             logits_list.append(logits.float().cpu())
             labels_list.append(labels)
 
-    logits_all = torch.cat(logits_list)
-    labels_all = torch.cat(labels_list)
+    logits_all = torch.cat(logits_list)       # [N, 2]
+    labels_all = torch.cat(labels_list).float()  # [N]
 
-    temperature = nn.Parameter(torch.ones(1))
+    # Grid search over T then refine with gradient descent on Brier
+    best_T, best_brier = 1.0, float("inf")
+    for T_candidate in np.linspace(0.3, 4.0, 74):
+        probs = torch.softmax(logits_all / T_candidate, dim=1)
+        p_syn = probs[:, 1]
+        brier = float(torch.mean((p_syn - labels_all) ** 2).item())
+        if brier < best_brier:
+            best_brier, best_T = brier, float(T_candidate)
+
+    # Gradient refinement around the grid winner
+    temperature = nn.Parameter(torch.tensor([best_T]))
     optimizer_cal = torch.optim.LBFGS(
-        [temperature], lr=0.1, max_iter=500, line_search_fn="strong_wolfe"
+        [temperature], lr=0.05, max_iter=200, line_search_fn="strong_wolfe"
     )
 
-    def nll_loss():
+    def brier_loss():
         optimizer_cal.zero_grad()
-        loss = F.cross_entropy(
-            logits_all / temperature.clamp(min=0.05, max=20.0), labels_all
-        )
+        T_clamped = temperature.clamp(min=0.1, max=10.0)
+        probs = torch.softmax(logits_all / T_clamped, dim=1)
+        loss = torch.mean((probs[:, 1] - labels_all) ** 2)
         loss.backward()
         return loss
 
-    optimizer_cal.step(nll_loss)
-    T = float(temperature.clamp(min=0.05, max=20.0).item())
-    print(f"Temperature calibration: T = {T:.4f} (T>1 softens, T<1 sharpens probabilities)")
+    optimizer_cal.step(brier_loss)
+    T = float(temperature.clamp(min=0.1, max=10.0).item())
+
+    # Compute calibrated Brier for reporting
+    probs = torch.softmax(logits_all / T, dim=1)
+    cal_brier = float(torch.mean((probs[:, 1] - labels_all) ** 2).item())
+    print(
+        f"Temperature calibration: T = {T:.4f}  "
+        f"(Brier before={best_brier:.4f} → after={cal_brier:.4f}, "
+        f"T>1 softens, T<1 sharpens)"
+    )
 
     # Bake T into the final linear layer so the model is self-contained
     with torch.no_grad():
@@ -126,6 +146,38 @@ def calibrate_temperature(model, val_loader, device, amp_enabled):
             print(f"WARNING: last layer is {type(last_linear)}, skipping weight scaling")
 
     return T
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mixup
+# ──────────────────────────────────────────────────────────────────────────────
+
+def mixup_batch(inputs, labels, alpha: float):
+    """
+    Apply Mixup: linearly interpolate pairs of training samples and their labels.
+
+    Mixup trains the model to predict convex combinations of labels for convex
+    combinations of inputs. This prevents overconfident predictions on ambiguous
+    or out-of-distribution samples, directly reducing the Brier score.
+    """
+    lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
+    idx = torch.randperm(inputs.size(0), device=inputs.device)
+    mixed = lam * inputs + (1 - lam) * inputs[idx]
+    labels_a, labels_b = labels, labels[idx]
+    return mixed, labels_a, labels_b, lam
+
+
+def mixup_loss(logits, labels_a, labels_b, lam, label_smoothing):
+    loss_a = F.cross_entropy(logits, labels_a, label_smoothing=label_smoothing)
+    loss_b = F.cross_entropy(logits, labels_b, label_smoothing=label_smoothing)
+    return lam * loss_a + (1 - lam) * loss_b
+
+
+def production_sn34(brier: float, mcc: float) -> float:
+    """Production formula: brier_score = (0.25 - brier) / 0.25, then geomean."""
+    mcc_norm = max(0.0, (mcc + 1.0) / 2.0) ** 1.2
+    brier_score = max(0.0, (0.25 - brier) / 0.25) ** 1.8
+    return float(max(0.0, (mcc_norm * brier_score)) ** 0.5)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -319,9 +371,26 @@ def main():
                     pg["lr"] = pg["base_lr"]
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                logits = model(batch_inputs)
-                ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
-                loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
+                # Apply mixup if enabled
+                if MIXUP_ALPHA > 0:
+                    mixed_inputs, labels_a, labels_b, lam = mixup_batch(
+                        batch_inputs, batch_labels, MIXUP_ALPHA
+                    )
+                    logits = model(mixed_inputs)
+                    ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
+                    loss = mixup_loss(logits, labels_a, labels_b, lam, ls)
+                else:
+                    logits = model(batch_inputs)
+                    ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
+                    loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
+
+                # Entropy regularization: reward uncertainty on ambiguous inputs.
+                # This reduces overconfident wrong predictions → lowers Brier.
+                if ENTROPY_LAMBDA > 0:
+                    probs = torch.softmax(logits, dim=-1)
+                    entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
+                    loss = loss - ENTROPY_LAMBDA * entropy
+
                 loss = loss / GRAD_ACCUM_STEPS
 
             if torch.isnan(loss):
@@ -380,7 +449,9 @@ def main():
     print(f"\n{'=' * 60}")
     print("---")
     print(f"model:                    {args.model}")
-    print(f"sn34_score:               {metrics['sn34_score']:.6f}")
+    print(f"sn34_score (local):       {metrics['sn34_score']:.6f}")
+    prod_sn34 = production_sn34(metrics['brier'], metrics['mcc'])
+    print(f"sn34_score (production):  {prod_sn34:.6f}  ← matches gasbench")
     print(f"accuracy:                 {metrics['accuracy']:.6f}")
     print(f"mcc:                      {metrics['mcc']:.6f}")
     print(f"brier:                    {metrics['brier']:.6f}")
@@ -399,10 +470,13 @@ def main():
     print(f"cosine_decay:             {not args.no_cosine_decay}")
     print(f"augment_level:            {AUGMENT_LEVEL}")
     print(f"max_per_class:            {MAX_PER_CLASS}")
+    print(f"mixup_alpha:              {MIXUP_ALPHA}")
+    print(f"entropy_lambda:           {ENTROPY_LAMBDA}")
 
     if WANDB_AVAILABLE:
         wandb.log({
             "eval/sn34_score": metrics["sn34_score"],
+            "eval/sn34_score_production": prod_sn34,
             "eval/accuracy": metrics["accuracy"],
             "eval/mcc": metrics["mcc"],
             "eval/brier": metrics["brier"],
@@ -412,6 +486,7 @@ def main():
         })
         wandb.summary.update({
             "sn34_score": metrics["sn34_score"],
+            "sn34_score_production": prod_sn34,
             "accuracy": metrics["accuracy"],
             "brier": metrics["brier"],
             "calibration_temperature": calibration_temperature,
@@ -445,6 +520,7 @@ def main():
         "modality": "image",
         "model": args.model,
         "sn34_score": metrics["sn34_score"],
+        "sn34_score_production": prod_sn34,
         "accuracy": metrics["accuracy"],
         "mcc": metrics["mcc"],
         "brier": metrics["brier"],
@@ -461,6 +537,8 @@ def main():
         "cosine_decay": not args.no_cosine_decay,
         "augment_level": AUGMENT_LEVEL,
         "max_per_class": MAX_PER_CLASS,
+        "mixup_alpha": MIXUP_ALPHA,
+        "entropy_lambda": ENTROPY_LAMBDA,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
 
