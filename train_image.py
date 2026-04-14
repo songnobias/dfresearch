@@ -54,24 +54,71 @@ from prepare import (
 # HYPERPARAMETERS — The agent tunes these
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "clip-vit-l14"       # "efficientnet-b4" or "clip-vit-l14"
-LEARNING_RATE = 3e-5              # head LR; backbone gets BACKBONE_LR_SCALE * this
-BACKBONE_LR_SCALE = 0.1           # backbone LR = LEARNING_RATE * 0.1 (prevents forgetting)
-WEIGHT_DECAY = 1e-2               # strong regularization improves holdout generalization
-BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE  # 32; reduce to 16 if OOM with CLIP
-AUGMENT_LEVEL = 3                 # 0=none, 1=basic, 2=medium, 3=hard
-MAX_PER_CLASS = 20000             # more diversity = better generalization on unseen generators
-WARMUP_STEPS = 200                # longer warmup stabilizes large ViT fine-tuning
-GRAD_ACCUM_STEPS = 1
-USE_AMP = True                    # mixed precision
-FREEZE_BACKBONE = False           # freeze pretrained backbone layers
-DROPOUT = 0.3
-LABEL_SMOOTHING = 0.15            # higher smoothing → less overconfident → lower Brier
-ETA_MIN_LR_RATIO = 0.001          # cosine floor: final lr = base_lr * this (after warmup)
+MODEL_NAME = "smogy-swin"
+LEARNING_RATE = 3e-5
+BACKBONE_LR_SCALE = 0.005
+WEIGHT_DECAY = 0.01
+BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
+AUGMENT_LEVEL = 3
+MAX_PER_CLASS = 20000
+WARMUP_STEPS = 750
+GRAD_ACCUM_STEPS = 4
+USE_AMP = True
+FREEZE_BACKBONE = False
+DROPOUT = 0.25
+LABEL_SMOOTHING = 0.05
+ETA_MIN_LR_RATIO = 0.005
 
 # ── Calibration / regularization ──────────────────────────────────────────────
-MIXUP_ALPHA = 0.2                 # Mixup beta distribution alpha; 0 disables mixup
-ENTROPY_LAMBDA = 0.005            # weight for entropy bonus (penalises overconfident logits)
+MIXUP_ALPHA = 0.2
+CUTMIX_ALPHA = 1.0
+CUTMIX_PROB = 0.10
+ENTROPY_LAMBDA = 0.005
+
+# ── EMA ───────────────────────────────────────────────────────────────────────
+EMA_DECAY = 0.9998
+
+# ── Focal loss ────────────────────────────────────────────────────────────────
+USE_FOCAL_LOSS = True
+FOCAL_GAMMA = 1.0
+
+# ── Dataset-balanced sampling ─────────────────────────────────────────────────
+DATASET_BALANCED_SAMPLING = True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EMA — Exponential Moving Average of model weights
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ModelEMA:
+    """Maintains an exponential moving average of model parameters for smoother,
+    better-calibrated predictions."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+
+    def apply_shadow(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            if name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            if name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup = {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -98,45 +145,43 @@ def calibrate_temperature(model, val_loader, device, amp_enabled):
             logits_list.append(logits.float().cpu())
             labels_list.append(labels)
 
-    logits_all = torch.cat(logits_list)       # [N, 2]
-    labels_all = torch.cat(labels_list).float()  # [N]
+    logits_all = torch.cat(logits_list)
+    labels_all = torch.cat(labels_list).float()
 
-    # Grid search over T then refine with gradient descent on Brier
     best_T, best_brier = 1.0, float("inf")
-    for T_candidate in np.linspace(0.3, 4.0, 74):
+    for T_candidate in np.concatenate([
+        np.linspace(0.05, 1.0, 200),
+        np.linspace(1.0, 10.0, 200),
+    ]):
         probs = torch.softmax(logits_all / T_candidate, dim=1)
         p_syn = probs[:, 1]
         brier = float(torch.mean((p_syn - labels_all) ** 2).item())
         if brier < best_brier:
             best_brier, best_T = brier, float(T_candidate)
 
-    # Gradient refinement around the grid winner
     temperature = nn.Parameter(torch.tensor([best_T]))
     optimizer_cal = torch.optim.LBFGS(
-        [temperature], lr=0.05, max_iter=200, line_search_fn="strong_wolfe"
+        [temperature], lr=0.01, max_iter=500, line_search_fn="strong_wolfe"
     )
 
     def brier_loss():
         optimizer_cal.zero_grad()
-        T_clamped = temperature.clamp(min=0.1, max=10.0)
+        T_clamped = temperature.clamp(min=0.05, max=15.0)
         probs = torch.softmax(logits_all / T_clamped, dim=1)
         loss = torch.mean((probs[:, 1] - labels_all) ** 2)
         loss.backward()
         return loss
 
     optimizer_cal.step(brier_loss)
-    T = float(temperature.clamp(min=0.1, max=10.0).item())
+    T = float(temperature.clamp(min=0.05, max=15.0).item())
 
-    # Compute calibrated Brier for reporting
     probs = torch.softmax(logits_all / T, dim=1)
     cal_brier = float(torch.mean((probs[:, 1] - labels_all) ** 2).item())
     print(
         f"Temperature calibration: T = {T:.4f}  "
-        f"(Brier before={best_brier:.4f} → after={cal_brier:.4f}, "
-        f"T>1 softens, T<1 sharpens)"
+        f"(Brier before={best_brier:.4f} → after={cal_brier:.4f})"
     )
 
-    # Bake T into the final linear layer so the model is self-contained
     with torch.no_grad():
         last_linear = model.head[-1]
         if isinstance(last_linear, nn.Linear):
@@ -149,28 +194,51 @@ def calibrate_temperature(model, val_loader, device, amp_enabled):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Mixup
+# Mixup & CutMix
 # ──────────────────────────────────────────────────────────────────────────────
 
 def mixup_batch(inputs, labels, alpha: float):
-    """
-    Apply Mixup: linearly interpolate pairs of training samples and their labels.
-
-    Mixup trains the model to predict convex combinations of labels for convex
-    combinations of inputs. This prevents overconfident predictions on ambiguous
-    or out-of-distribution samples, directly reducing the Brier score.
-    """
     lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
     idx = torch.randperm(inputs.size(0), device=inputs.device)
     mixed = lam * inputs + (1 - lam) * inputs[idx]
-    labels_a, labels_b = labels, labels[idx]
-    return mixed, labels_a, labels_b, lam
+    return mixed, labels, labels[idx], lam
 
 
-def mixup_loss(logits, labels_a, labels_b, lam, label_smoothing):
-    loss_a = F.cross_entropy(logits, labels_a, label_smoothing=label_smoothing)
-    loss_b = F.cross_entropy(logits, labels_b, label_smoothing=label_smoothing)
+def cutmix_batch(inputs, labels, alpha: float):
+    lam = float(np.random.beta(alpha, alpha))
+    idx = torch.randperm(inputs.size(0), device=inputs.device)
+    B, C, H, W = inputs.shape
+
+    cx = np.random.uniform(0, W)
+    cy = np.random.uniform(0, H)
+    rw = W * math.sqrt(1 - lam) / 2
+    rh = H * math.sqrt(1 - lam) / 2
+    x1 = int(max(0, cx - rw))
+    y1 = int(max(0, cy - rh))
+    x2 = int(min(W, cx + rw))
+    y2 = int(min(H, cy + rh))
+
+    mixed = inputs.clone()
+    mixed[:, :, y1:y2, x1:x2] = inputs[idx, :, y1:y2, x1:x2]
+    area_ratio = (x2 - x1) * (y2 - y1) / (W * H)
+    lam = 1 - area_ratio
+    return mixed, labels, labels[idx], lam
+
+
+def mixed_loss(logits, labels_a, labels_b, lam, label_smoothing, focal_gamma=0.0):
+    if focal_gamma > 0:
+        loss_a = focal_cross_entropy(logits, labels_a, label_smoothing, focal_gamma)
+        loss_b = focal_cross_entropy(logits, labels_b, label_smoothing, focal_gamma)
+    else:
+        loss_a = F.cross_entropy(logits, labels_a, label_smoothing=label_smoothing)
+        loss_b = F.cross_entropy(logits, labels_b, label_smoothing=label_smoothing)
     return lam * loss_a + (1 - lam) * loss_b
+
+
+def focal_cross_entropy(logits, labels, label_smoothing=0.0, gamma=2.0):
+    ce = F.cross_entropy(logits, labels, label_smoothing=label_smoothing, reduction='none')
+    pt = torch.exp(-ce)
+    return ((1 - pt) ** gamma * ce).mean()
 
 
 def production_sn34(brier: float, mcc: float) -> float:
@@ -191,21 +259,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--time-budget", type=int, default=TIME_BUDGET)
     parser.add_argument(
-        "--label-smoothing",
-        type=float,
-        default=LABEL_SMOOTHING,
-        help="Cross-entropy label smoothing (0 disables)",
+        "--label-smoothing", type=float, default=LABEL_SMOOTHING,
     )
-    parser.add_argument(
-        "--no-cosine-decay",
-        action="store_true",
-        help="Keep base LR after warmup instead of cosine decay to end of time budget",
-    )
-    parser.add_argument(
-        "--no-temperature-calibration",
-        action="store_true",
-        help="Skip post-training temperature scaling calibration",
-    )
+    parser.add_argument("--no-cosine-decay", action="store_true")
+    parser.add_argument("--no-temperature-calibration", action="store_true")
+    parser.add_argument("--no-ema", action="store_true")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -230,18 +288,58 @@ def main():
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {args.model} ({num_params / 1e6:.1f}M params, {num_trainable / 1e6:.1f}M trainable)")
 
-    # ── Data ──
-    from dfresearch.data import make_dataloader
+    # ── EMA ──
+    ema = None
+    if not args.no_ema and EMA_DECAY > 0:
+        ema = ModelEMA(model, decay=EMA_DECAY)
+        print(f"EMA enabled (decay={EMA_DECAY})")
 
-    train_loader = make_dataloader(
-        "image", split="train", batch_size=args.batch_size,
-        target_size=TARGET_IMAGE_SIZE, augment_level=AUGMENT_LEVEL,
-        max_per_class=MAX_PER_CLASS,
+    # ── Data ──
+    from collections import Counter
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+    from dfresearch.data import gather_samples, ImageDeepfakeDataset
+
+    train_samples = gather_samples("image", split="train", max_per_class=MAX_PER_CLASS)
+    val_samples = gather_samples("image", split="val", max_per_class=MAX_PER_CLASS)
+
+    train_dataset = ImageDeepfakeDataset(
+        train_samples, target_size=TARGET_IMAGE_SIZE, augment_level=AUGMENT_LEVEL,
     )
-    val_loader = make_dataloader(
-        "image", split="val", batch_size=args.batch_size * 2,
-        target_size=TARGET_IMAGE_SIZE, augment_level=0,
-        max_per_class=MAX_PER_CLASS,
+    val_dataset = ImageDeepfakeDataset(
+        val_samples, target_size=TARGET_IMAGE_SIZE, augment_level=0,
+    )
+
+    if DATASET_BALANCED_SAMPLING and len(train_samples) > 0:
+        dataset_names = [str(s[0].parent.name) for s in train_samples]
+        dataset_counts = Counter(dataset_names)
+        sample_weights = torch.tensor(
+            [1.0 / dataset_counts[name] for name in dataset_names]
+        )
+        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+        print(f"Dataset-balanced sampling: {len(dataset_counts)} datasets, "
+              f"min={min(dataset_counts.values())}, max={max(dataset_counts.values())}")
+    else:
+        sampler = None
+
+    num_workers = min(4, max(1, len(train_dataset)))
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=min(args.batch_size, max(len(train_dataset), 1)),
+        sampler=sampler,
+        shuffle=(sampler is None),
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=(len(train_dataset) > args.batch_size),
+        persistent_workers=(num_workers > 0),
+    )
+    val_num_workers = min(4, max(1, len(val_dataset)))
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=min(args.batch_size * 2, max(len(val_dataset), 1)),
+        shuffle=False,
+        num_workers=val_num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(val_num_workers > 0),
     )
 
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
@@ -251,15 +349,16 @@ def main():
         sys.exit(1)
 
     # ── Optimizer: differential learning rates ──
-    # Backbone (vision_model / backbone) uses a much lower LR to preserve
-    # pretrained representations while the head adapts faster.
-    backbone_module = getattr(model, "vision_model", None) or getattr(model, "backbone", None)
+    backbone_module = (
+        getattr(model, "vision_model", None)
+        or getattr(model, "swin", None)
+        or getattr(model, "backbone", None)
+    )
     head_module = getattr(model, "head", None)
 
     if backbone_module is not None and head_module is not None:
         backbone_params = list(backbone_module.parameters())
         head_params = list(head_module.parameters())
-        # Any remaining parameters (e.g. norm buffers not in backbone/head)
         backbone_ids = {id(p) for p in backbone_params}
         head_ids = {id(p) for p in head_params}
         other_params = [
@@ -278,19 +377,23 @@ def main():
         )
         print(f"Optimizer: backbone lr={backbone_lr:.1e}, head lr={args.lr:.1e}")
     else:
-        # Fallback: single param group (for models without distinct backbone/head attrs)
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
             lr=args.lr,
             weight_decay=WEIGHT_DECAY,
         )
-        # Add base_lr so the LR schedule code below works uniformly
         for pg in optimizer.param_groups:
             pg["base_lr"] = args.lr
         print(f"Optimizer: single group lr={args.lr:.1e}")
 
     amp_enabled = USE_AMP and device == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+    # ── Configuration summary ──
+    print(f"\nConfig: grad_accum={GRAD_ACCUM_STEPS}, weight_decay={WEIGHT_DECAY}")
+    print(f"  mixup_alpha={MIXUP_ALPHA}, cutmix_alpha={CUTMIX_ALPHA}, cutmix_prob={CUTMIX_PROB}")
+    print(f"  focal_loss={'gamma=' + str(FOCAL_GAMMA) if USE_FOCAL_LOSS else 'off'}")
+    print(f"  entropy_lambda={ENTROPY_LAMBDA}, dropout={DROPOUT}")
 
     # ── W&B init ──
     if WANDB_AVAILABLE:
@@ -308,6 +411,13 @@ def main():
                 "cosine_decay": not args.no_cosine_decay,
                 "eta_min_lr_ratio": ETA_MIN_LR_RATIO,
                 "temperature_calibration": not args.no_temperature_calibration,
+                "mixup_alpha": MIXUP_ALPHA,
+                "cutmix_alpha": CUTMIX_ALPHA,
+                "cutmix_prob": CUTMIX_PROB,
+                "focal_loss": USE_FOCAL_LOSS,
+                "focal_gamma": FOCAL_GAMMA,
+                "entropy_lambda": ENTROPY_LAMBDA,
+                "ema_decay": EMA_DECAY,
                 "num_params_M": round(num_params / 1e6, 1),
                 "num_trainable_M": round(num_trainable / 1e6, 1),
                 "train_samples": len(train_loader.dataset),
@@ -328,10 +438,10 @@ def main():
     t_start = time.time()
     budget = args.time_budget
     is_tty = sys.stdout.isatty()
+    best_prod_sn34 = 0.0
 
     print(f"\nTraining for {budget}s budget...", flush=True)
-    if args.label_smoothing > 0:
-        print(f"Label smoothing: {args.label_smoothing}", flush=True)
+    print(f"Label smoothing: {args.label_smoothing}", flush=True)
     print(f"LR schedule: warmup {WARMUP_STEPS} steps, then ", end="", flush=True)
     print("cosine to end of budget" if not args.no_cosine_decay else "constant LR", flush=True)
 
@@ -352,7 +462,6 @@ def main():
             batch_inputs = batch_inputs.to(device, non_blocking=True)
             batch_labels = batch_labels.to(device, non_blocking=True)
 
-            # Per-group LR schedule using each group's own base_lr
             if WARMUP_STEPS > 0 and step < WARMUP_STEPS:
                 lr_scale = (step + 1) / WARMUP_STEPS
                 for pg in optimizer.param_groups:
@@ -371,21 +480,32 @@ def main():
                     pg["lr"] = pg["base_lr"]
 
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                # Apply mixup if enabled
-                if MIXUP_ALPHA > 0:
+                # Choose between CutMix, Mixup, or plain
+                use_cutmix = CUTMIX_ALPHA > 0 and np.random.random() < CUTMIX_PROB
+                use_mixup = MIXUP_ALPHA > 0 and not use_cutmix
+
+                focal_g = FOCAL_GAMMA if USE_FOCAL_LOSS else 0.0
+                ls = args.label_smoothing
+
+                if use_cutmix:
+                    mixed_inputs, labels_a, labels_b, lam = cutmix_batch(
+                        batch_inputs, batch_labels, CUTMIX_ALPHA
+                    )
+                    logits = model(mixed_inputs)
+                    loss = mixed_loss(logits, labels_a, labels_b, lam, ls, focal_g)
+                elif use_mixup:
                     mixed_inputs, labels_a, labels_b, lam = mixup_batch(
                         batch_inputs, batch_labels, MIXUP_ALPHA
                     )
                     logits = model(mixed_inputs)
-                    ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
-                    loss = mixup_loss(logits, labels_a, labels_b, lam, ls)
+                    loss = mixed_loss(logits, labels_a, labels_b, lam, ls, focal_g)
                 else:
                     logits = model(batch_inputs)
-                    ls = args.label_smoothing if args.label_smoothing > 0 else 0.0
-                    loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
+                    if USE_FOCAL_LOSS:
+                        loss = focal_cross_entropy(logits, batch_labels, ls, FOCAL_GAMMA)
+                    else:
+                        loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
 
-                # Entropy regularization: reward uncertainty on ambiguous inputs.
-                # This reduces overconfident wrong predictions → lowers Brier.
                 if ENTROPY_LAMBDA > 0:
                     probs = torch.softmax(logits, dim=-1)
                     entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
@@ -406,13 +526,15 @@ def main():
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
+                if ema is not None:
+                    ema.update(model)
+
             batch_loss = loss.item() * GRAD_ACCUM_STEPS
             total_loss += batch_loss
             epoch_loss += batch_loss
             epoch_steps += 1
             step += 1
 
-            # Log the head LR (last param group) for display
             head_lr = optimizer.param_groups[-1]["lr"]
             remaining = max(0, budget - elapsed)
             pbar.set_postfix_str(f"loss={epoch_loss / epoch_steps:.4f} lr={head_lr:.1e} rem={remaining:.0f}s")
@@ -427,6 +549,11 @@ def main():
                 wandb.log({"train/loss": avg_loss, "train/lr": head_lr, "train/epoch": epoch, "train/step": step})
 
     training_seconds = time.time() - t_start
+
+    # ── Apply EMA weights before evaluation ──
+    if ema is not None:
+        print("\nApplying EMA weights for evaluation...")
+        ema.apply_shadow(model)
 
     # ── Temperature calibration ──
     calibration_temperature = 1.0
@@ -446,11 +573,11 @@ def main():
         peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 
     # ── Output summary ──
+    prod_sn34 = production_sn34(metrics['brier'], metrics['mcc'])
     print(f"\n{'=' * 60}")
     print("---")
     print(f"model:                    {args.model}")
     print(f"sn34_score (local):       {metrics['sn34_score']:.6f}")
-    prod_sn34 = production_sn34(metrics['brier'], metrics['mcc'])
     print(f"sn34_score (production):  {prod_sn34:.6f}  ← matches gasbench")
     print(f"accuracy:                 {metrics['accuracy']:.6f}")
     print(f"mcc:                      {metrics['mcc']:.6f}")
@@ -471,7 +598,11 @@ def main():
     print(f"augment_level:            {AUGMENT_LEVEL}")
     print(f"max_per_class:            {MAX_PER_CLASS}")
     print(f"mixup_alpha:              {MIXUP_ALPHA}")
+    print(f"cutmix_alpha:             {CUTMIX_ALPHA}")
+    print(f"cutmix_prob:              {CUTMIX_PROB}")
+    print(f"focal_loss:               {USE_FOCAL_LOSS} (gamma={FOCAL_GAMMA})")
     print(f"entropy_lambda:           {ENTROPY_LAMBDA}")
+    print(f"ema_decay:                {EMA_DECAY}")
 
     if WANDB_AVAILABLE:
         wandb.log({
@@ -538,7 +669,12 @@ def main():
         "augment_level": AUGMENT_LEVEL,
         "max_per_class": MAX_PER_CLASS,
         "mixup_alpha": MIXUP_ALPHA,
+        "cutmix_alpha": CUTMIX_ALPHA,
+        "cutmix_prob": CUTMIX_PROB,
+        "focal_loss": USE_FOCAL_LOSS,
+        "focal_gamma": FOCAL_GAMMA,
         "entropy_lambda": ENTROPY_LAMBDA,
+        "ema_decay": EMA_DECAY,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
 

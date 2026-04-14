@@ -52,8 +52,11 @@ class SMOGYSwinDetector(nn.Module):
             self.feat_dim = config.hidden_size  # typically 1024
 
         self.head = nn.Sequential(
+            nn.LayerNorm(self.feat_dim),
+            nn.Linear(self.feat_dim, 512),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(self.feat_dim, num_classes),
+            nn.Linear(512, num_classes),
         )
 
         self.register_buffer(
