@@ -55,24 +55,24 @@ from prepare import (
 # ──────────────────────────────────────────────────────────────────────────────
 
 MODEL_NAME = "smogy-swin"
-LEARNING_RATE = 3e-5
-BACKBONE_LR_SCALE = 0.005
+LEARNING_RATE = 5e-5
+BACKBONE_LR_SCALE = 0.05
 WEIGHT_DECAY = 0.01
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
-AUGMENT_LEVEL = 3
+AUGMENT_LEVEL = 1
 MAX_PER_CLASS = 20000
-WARMUP_STEPS = 750
+WARMUP_STEPS = 200
 GRAD_ACCUM_STEPS = 4
 USE_AMP = True
 FREEZE_BACKBONE = False
-DROPOUT = 0.25
-LABEL_SMOOTHING = 0.05
-ETA_MIN_LR_RATIO = 0.005
+DROPOUT = 0.1
+LABEL_SMOOTHING = 0.03
+ETA_MIN_LR_RATIO = 0.01
 
 # ── Calibration / regularization ──────────────────────────────────────────────
-MIXUP_ALPHA = 0.2
-CUTMIX_ALPHA = 1.0
-CUTMIX_PROB = 0.10
+MIXUP_ALPHA = 0.05
+CUTMIX_ALPHA = 0.0
+CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.005
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ EMA_DECAY = 0.9998
 
 # ── Focal loss ────────────────────────────────────────────────────────────────
 USE_FOCAL_LOSS = True
-FOCAL_GAMMA = 1.0
+FOCAL_GAMMA = 3.0
 
 # ── Dataset-balanced sampling ─────────────────────────────────────────────────
 DATASET_BALANCED_SAMPLING = True
