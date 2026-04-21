@@ -54,33 +54,33 @@ from prepare import (
 # HYPERPARAMETERS — The agent tunes these
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "smogy-swin"
-LEARNING_RATE = 5e-5
-BACKBONE_LR_SCALE = 0.05
-WEIGHT_DECAY = 0.01
+MODEL_NAME = "clip-vit-l14"
+LEARNING_RATE = 2e-4
+BACKBONE_LR_SCALE = 0.01
+WEIGHT_DECAY = 0.05
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
-AUGMENT_LEVEL = 1
+AUGMENT_LEVEL = 2
 MAX_PER_CLASS = 20000
 WARMUP_STEPS = 200
 GRAD_ACCUM_STEPS = 4
 USE_AMP = True
-FREEZE_BACKBONE = False
-DROPOUT = 0.1
-LABEL_SMOOTHING = 0.03
+FREEZE_BACKBONE = True
+DROPOUT = 0.2
+LABEL_SMOOTHING = 0.01
 ETA_MIN_LR_RATIO = 0.01
 
 # ── Calibration / regularization ──────────────────────────────────────────────
-MIXUP_ALPHA = 0.05
+MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
-ENTROPY_LAMBDA = 0.005
+ENTROPY_LAMBDA = 0.0
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
 
 # ── Focal loss ────────────────────────────────────────────────────────────────
-USE_FOCAL_LOSS = True
-FOCAL_GAMMA = 3.0
+USE_FOCAL_LOSS = False
+FOCAL_GAMMA = 2.0
 
 # ── Dataset-balanced sampling ─────────────────────────────────────────────────
 DATASET_BALANCED_SAMPLING = True
@@ -122,18 +122,28 @@ class ModelEMA:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Temperature calibration
+# Logit calibration
 # ──────────────────────────────────────────────────────────────────────────────
 
-def calibrate_temperature(model, val_loader, device, amp_enabled):
+def calibrate_logits(model, val_loader, device, amp_enabled):
     """
-    Find scalar temperature T that minimises Brier score on the validation set.
+    Jointly calibrate temperature and an additive fake-logit bias on the
+    validation set.
 
-    The production sn34_score uses brier_score = (0.25 - brier) / 0.25 raised to
-    β=1.8, so minimising Brier directly is the correct objective — not NLL.
+    Recent work on open-world AI-image detection shows that detectors under
+    distribution shift often need a threshold/logit shift in addition to
+    confidence rescaling. A pure temperature cannot move the decision boundary,
+    so we search over:
 
-    T is baked into the final linear layer so the model is self-contained.
+      p(fake) = sigmoid((fake_logit - real_logit) / T + alpha)
+
+    and maximize the production SN34 objective directly on the validation set.
+
+    The chosen temperature and bias are baked into the final linear layer so the
+    exported model remains self-contained.
     """
+    from sklearn.metrics import matthews_corrcoef
+
     model.eval()
     logits_list, labels_list = [], []
 
@@ -145,52 +155,78 @@ def calibrate_temperature(model, val_loader, device, amp_enabled):
             logits_list.append(logits.float().cpu())
             labels_list.append(labels)
 
-    logits_all = torch.cat(logits_list)
-    labels_all = torch.cat(labels_list).float()
+    logits_all = torch.cat(logits_list).float()
+    labels_np = torch.cat(labels_list).cpu().numpy().astype(int)
+    margin = (logits_all[:, 1] - logits_all[:, 0]).cpu().numpy()
 
-    best_T, best_brier = 1.0, float("inf")
-    for T_candidate in np.concatenate([
-        np.linspace(0.05, 1.0, 200),
-        np.linspace(1.0, 10.0, 200),
-    ]):
-        probs = torch.softmax(logits_all / T_candidate, dim=1)
-        p_syn = probs[:, 1]
-        brier = float(torch.mean((p_syn - labels_all) ** 2).item())
-        if brier < best_brier:
-            best_brier, best_T = brier, float(T_candidate)
+    def score_params(temp: float, alpha: float):
+        z = margin / temp + alpha
+        probs = 1.0 / (1.0 + np.exp(-np.clip(z, -60.0, 60.0)))
+        preds = (z >= 0.0).astype(int)
+        brier = float(np.mean((probs - labels_np) ** 2))
+        if len(np.unique(preds)) < 2 or len(np.unique(labels_np)) < 2:
+            mcc = 0.0
+        else:
+            mcc = float(matthews_corrcoef(labels_np, preds))
+            if np.isnan(mcc):
+                mcc = 0.0
+        return production_sn34(brier, mcc), brier, mcc
 
-    temperature = nn.Parameter(torch.tensor([best_T]))
-    optimizer_cal = torch.optim.LBFGS(
-        [temperature], lr=0.01, max_iter=500, line_search_fn="strong_wolfe"
-    )
+    baseline_score, baseline_brier, baseline_mcc = score_params(1.0, 0.0)
 
-    def brier_loss():
-        optimizer_cal.zero_grad()
-        T_clamped = temperature.clamp(min=0.05, max=15.0)
-        probs = torch.softmax(logits_all / T_clamped, dim=1)
-        loss = torch.mean((probs[:, 1] - labels_all) ** 2)
-        loss.backward()
-        return loss
+    coarse_temps = np.concatenate([
+        np.linspace(0.35, 1.5, 30),
+        np.linspace(1.6, 4.0, 16),
+    ])
+    coarse_alphas = np.linspace(-4.0, 4.0, 161)
 
-    optimizer_cal.step(brier_loss)
-    T = float(temperature.clamp(min=0.05, max=15.0).item())
+    best_score = -1.0
+    best_T = 1.0
+    best_alpha = 0.0
+    best_brier = baseline_brier
+    best_mcc = baseline_mcc
 
-    probs = torch.softmax(logits_all / T, dim=1)
-    cal_brier = float(torch.mean((probs[:, 1] - labels_all) ** 2).item())
+    for temp in coarse_temps:
+        for alpha in coarse_alphas:
+            score, brier, mcc = score_params(float(temp), float(alpha))
+            if score > best_score:
+                best_score = score
+                best_T = float(temp)
+                best_alpha = float(alpha)
+                best_brier = brier
+                best_mcc = mcc
+
+    fine_temps = np.linspace(max(0.2, best_T * 0.7), best_T * 1.3, 41)
+    fine_alphas = np.linspace(best_alpha - 1.0, best_alpha + 1.0, 81)
+    for temp in fine_temps:
+        for alpha in fine_alphas:
+            score, brier, mcc = score_params(float(temp), float(alpha))
+            if score > best_score:
+                best_score = score
+                best_T = float(temp)
+                best_alpha = float(alpha)
+                best_brier = brier
+                best_mcc = mcc
+
     print(
-        f"Temperature calibration: T = {T:.4f}  "
-        f"(Brier before={best_brier:.4f} → after={cal_brier:.4f})"
+        "Logit calibration: "
+        f"T={best_T:.4f}, alpha={best_alpha:+.4f}  "
+        f"(prod_sn34 {baseline_score:.4f} -> {best_score:.4f}, "
+        f"Brier {baseline_brier:.4f} -> {best_brier:.4f}, "
+        f"MCC {baseline_mcc:.4f} -> {best_mcc:.4f})"
     )
 
     with torch.no_grad():
         last_linear = model.head[-1]
         if isinstance(last_linear, nn.Linear):
-            last_linear.weight.data.div_(T)
-            last_linear.bias.data.div_(T)
+            last_linear.weight.data.div_(best_T)
+            last_linear.bias.data.div_(best_T)
+            if last_linear.bias is not None and last_linear.bias.numel() >= 2:
+                last_linear.bias.data[1].add_(best_alpha)
         else:
             print(f"WARNING: last layer is {type(last_linear)}, skipping weight scaling")
 
-    return T
+    return best_T, best_alpha
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -264,6 +300,11 @@ def main():
     parser.add_argument("--no-cosine-decay", action="store_true")
     parser.add_argument("--no-temperature-calibration", action="store_true")
     parser.add_argument("--no-ema", action="store_true")
+    parser.add_argument(
+        "--freeze-backbone",
+        action=argparse.BooleanOptionalAction,
+        default=FREEZE_BACKBONE,
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -275,9 +316,16 @@ def main():
 
     # ── Model ──
     from dfresearch.models import get_model
-    model = get_model("image", args.model, num_classes=2, pretrained=True, dropout=DROPOUT)
+    model = get_model(
+        "image",
+        args.model,
+        num_classes=2,
+        pretrained=True,
+        dropout=DROPOUT,
+        freeze_backbone=args.freeze_backbone,
+    )
 
-    if FREEZE_BACKBONE:
+    if args.freeze_backbone:
         backbone = getattr(model, "backbone", None) or getattr(model, "vision_model", None)
         if backbone is not None:
             for param in backbone.parameters():
@@ -287,6 +335,7 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {args.model} ({num_params / 1e6:.1f}M params, {num_trainable / 1e6:.1f}M trainable)")
+    print(f"Backbone frozen: {args.freeze_backbone}")
 
     # ── EMA ──
     ema = None
@@ -405,7 +454,7 @@ def main():
                 "batch_size": args.batch_size,
                 "time_budget": args.time_budget, "augment_level": AUGMENT_LEVEL,
                 "warmup_steps": WARMUP_STEPS, "grad_accum": GRAD_ACCUM_STEPS,
-                "dropout": DROPOUT, "freeze_backbone": FREEZE_BACKBONE,
+                "dropout": DROPOUT, "freeze_backbone": args.freeze_backbone,
                 "weight_decay": WEIGHT_DECAY, "max_per_class": MAX_PER_CLASS,
                 "label_smoothing": args.label_smoothing,
                 "cosine_decay": not args.no_cosine_decay,
@@ -555,11 +604,14 @@ def main():
         print("\nApplying EMA weights for evaluation...")
         ema.apply_shadow(model)
 
-    # ── Temperature calibration ──
+    # ── Logit calibration ──
     calibration_temperature = 1.0
+    calibration_alpha = 0.0
     if not args.no_temperature_calibration:
-        print("\nCalibrating temperature on validation set...")
-        calibration_temperature = calibrate_temperature(model, val_loader, device, amp_enabled)
+        print("\nCalibrating temperature + fake-logit bias on validation set...")
+        calibration_temperature, calibration_alpha = calibrate_logits(
+            model, val_loader, device, amp_enabled
+        )
 
     # ── Evaluation ──
     print("\nEvaluating...")
@@ -583,6 +635,7 @@ def main():
     print(f"mcc:                      {metrics['mcc']:.6f}")
     print(f"brier:                    {metrics['brier']:.6f}")
     print(f"calibration_temperature:  {calibration_temperature:.4f}")
+    print(f"calibration_alpha:        {calibration_alpha:+.4f}")
     print(f"training_seconds:         {training_seconds:.1f}")
     print(f"total_seconds:            {total_seconds:.1f}")
     print(f"peak_vram_mb:             {peak_vram_mb:.1f}")
@@ -593,6 +646,7 @@ def main():
     print(f"learning_rate:            {args.lr}")
     print(f"backbone_lr_scale:        {BACKBONE_LR_SCALE}")
     print(f"weight_decay:             {WEIGHT_DECAY}")
+    print(f"freeze_backbone:          {args.freeze_backbone}")
     print(f"label_smoothing:          {args.label_smoothing}")
     print(f"cosine_decay:             {not args.no_cosine_decay}")
     print(f"augment_level:            {AUGMENT_LEVEL}")
@@ -612,6 +666,7 @@ def main():
             "eval/mcc": metrics["mcc"],
             "eval/brier": metrics["brier"],
             "eval/calibration_temperature": calibration_temperature,
+            "eval/calibration_alpha": calibration_alpha,
             "system/peak_vram_mb": peak_vram_mb,
             "system/training_seconds": training_seconds,
         })
@@ -621,6 +676,7 @@ def main():
             "accuracy": metrics["accuracy"],
             "brier": metrics["brier"],
             "calibration_temperature": calibration_temperature,
+            "calibration_alpha": calibration_alpha,
         })
 
     # Save submission-ready checkpoint directory
@@ -656,6 +712,7 @@ def main():
         "mcc": metrics["mcc"],
         "brier": metrics["brier"],
         "calibration_temperature": calibration_temperature,
+        "calibration_alpha": calibration_alpha,
         "training_seconds": training_seconds,
         "peak_vram_mb": peak_vram_mb,
         "num_steps": step,
@@ -664,6 +721,7 @@ def main():
         "learning_rate": args.lr,
         "backbone_lr_scale": BACKBONE_LR_SCALE,
         "weight_decay": WEIGHT_DECAY,
+        "freeze_backbone": args.freeze_backbone,
         "label_smoothing": args.label_smoothing,
         "cosine_decay": not args.no_cosine_decay,
         "augment_level": AUGMENT_LEVEL,
