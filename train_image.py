@@ -74,6 +74,7 @@ MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.0
+BRIER_LAMBDA = 0.15
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
@@ -84,6 +85,27 @@ FOCAL_GAMMA = 2.0
 
 # ── Dataset-balanced sampling ─────────────────────────────────────────────────
 DATASET_BALANCED_SAMPLING = True
+MEDIA_TYPE_TARGET_WEIGHTS = {
+    "real": 1.0,
+    "synthetic": 1.25,
+    "semisynthetic": 2.5,
+}
+HARD_DATASET_KEYWORDS = (
+    "openfake",
+    "fakeclue",
+    "receipts",
+    "face-swap",
+    "retrievatar",
+    "pica",
+    "nano-banana",
+)
+HARD_DATASET_BOOST = 2.0
+
+# ── Progressive CLIP unfreezing ───────────────────────────────────────────────
+STAGED_UNFREEZE = True
+UNFREEZE_AT_PROGRESS = 0.65
+UNFREEZE_LAST_N_LAYERS = 4
+UNFREEZE_LR_SCALE = 0.002
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -277,6 +299,62 @@ def focal_cross_entropy(logits, labels, label_smoothing=0.0, gamma=2.0):
     return ((1 - pt) ** gamma * ce).mean()
 
 
+def soft_brier_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    probs = torch.softmax(logits.float(), dim=-1)
+    return torch.mean(torch.sum((probs - targets.float()) ** 2, dim=-1))
+
+
+def one_hot_targets(labels: torch.Tensor, num_classes: int = 2) -> torch.Tensor:
+    return F.one_hot(labels, num_classes=num_classes).float()
+
+
+def maybe_unfreeze_clip_tail(model, optimizer, head_lr: float, already_unfroze: bool) -> bool:
+    """Unfreeze the last CLIP blocks late in training."""
+    if already_unfroze or not STAGED_UNFREEZE:
+        return already_unfroze
+
+    vision_model = getattr(model, "vision_model", None)
+    if vision_model is None or not hasattr(vision_model, "encoder"):
+        return already_unfroze
+
+    encoder_layers = getattr(vision_model.encoder, "layers", None)
+    if not encoder_layers:
+        return already_unfroze
+
+    newly_trainable = []
+    for layer in encoder_layers[-UNFREEZE_LAST_N_LAYERS:]:
+        for param in layer.parameters():
+            if not param.requires_grad:
+                param.requires_grad = True
+                newly_trainable.append(param)
+
+    for attr_name in ("post_layernorm", "pre_layrnorm", "pre_layernorm"):
+        module = getattr(vision_model, attr_name, None)
+        if module is None:
+            continue
+        for param in module.parameters():
+            if not param.requires_grad:
+                param.requires_grad = True
+                newly_trainable.append(param)
+
+    if not newly_trainable:
+        return already_unfroze
+
+    backbone_lr = head_lr * UNFREEZE_LR_SCALE
+    optimizer.add_param_group(
+        {
+            "params": newly_trainable,
+            "lr": backbone_lr,
+            "base_lr": backbone_lr,
+        }
+    )
+    print(
+        f"Progressive unfreezing enabled: last {UNFREEZE_LAST_N_LAYERS} CLIP blocks "
+        f"at lr={backbone_lr:.1e}"
+    )
+    return True
+
+
 def production_sn34(brier: float, mcc: float) -> float:
     """Production formula: brier_score = (0.25 - brier) / 0.25, then geomean."""
     mcc_norm = max(0.0, (mcc + 1.0) / 2.0) ** 1.2
@@ -346,7 +424,7 @@ def main():
     # ── Data ──
     from collections import Counter
     from torch.utils.data import DataLoader, WeightedRandomSampler
-    from dfresearch.data import gather_samples, ImageDeepfakeDataset
+    from dfresearch.data import gather_samples, ImageDeepfakeDataset, load_dataset_config
 
     train_samples = gather_samples("image", split="train", max_per_class=MAX_PER_CLASS)
     val_samples = gather_samples("image", split="val", max_per_class=MAX_PER_CLASS)
@@ -359,14 +437,37 @@ def main():
     )
 
     if DATASET_BALANCED_SAMPLING and len(train_samples) > 0:
+        dataset_config = load_dataset_config("image")
+        media_type_by_dataset = {
+            ds["name"]: ds.get("media_type", "synthetic")
+            for ds in dataset_config["datasets"]
+        }
         dataset_names = [str(s[0].parent.name) for s in train_samples]
+        media_types = [media_type_by_dataset.get(name, "synthetic") for name in dataset_names]
         dataset_counts = Counter(dataset_names)
+        media_counts = Counter(media_types)
+
+        def dataset_boost(name: str) -> float:
+            lower_name = name.lower()
+            if any(keyword in lower_name for keyword in HARD_DATASET_KEYWORDS):
+                return HARD_DATASET_BOOST
+            return 1.0
+
         sample_weights = torch.tensor(
-            [1.0 / dataset_counts[name] for name in dataset_names]
+            [
+                (
+                    (1.0 / dataset_counts[name])
+                    * (MEDIA_TYPE_TARGET_WEIGHTS.get(media_type, 1.0) / media_counts[media_type])
+                    * dataset_boost(name)
+                )
+                for name, media_type in zip(dataset_names, media_types)
+            ],
+            dtype=torch.double,
         )
         sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
         print(f"Dataset-balanced sampling: {len(dataset_counts)} datasets, "
               f"min={min(dataset_counts.values())}, max={max(dataset_counts.values())}")
+        print(f"Media-balanced weights: {dict(media_counts)}")
     else:
         sampler = None
 
@@ -442,7 +543,7 @@ def main():
     print(f"\nConfig: grad_accum={GRAD_ACCUM_STEPS}, weight_decay={WEIGHT_DECAY}")
     print(f"  mixup_alpha={MIXUP_ALPHA}, cutmix_alpha={CUTMIX_ALPHA}, cutmix_prob={CUTMIX_PROB}")
     print(f"  focal_loss={'gamma=' + str(FOCAL_GAMMA) if USE_FOCAL_LOSS else 'off'}")
-    print(f"  entropy_lambda={ENTROPY_LAMBDA}, dropout={DROPOUT}")
+    print(f"  entropy_lambda={ENTROPY_LAMBDA}, brier_lambda={BRIER_LAMBDA}, dropout={DROPOUT}")
 
     # ── W&B init ──
     if WANDB_AVAILABLE:
@@ -466,6 +567,7 @@ def main():
                 "focal_loss": USE_FOCAL_LOSS,
                 "focal_gamma": FOCAL_GAMMA,
                 "entropy_lambda": ENTROPY_LAMBDA,
+                "brier_lambda": BRIER_LAMBDA,
                 "ema_decay": EMA_DECAY,
                 "num_params_M": round(num_params / 1e6, 1),
                 "num_trainable_M": round(num_trainable / 1e6, 1),
@@ -488,6 +590,7 @@ def main():
     budget = args.time_budget
     is_tty = sys.stdout.isatty()
     best_prod_sn34 = 0.0
+    clip_tail_unfroze = False
 
     print(f"\nTraining for {budget}s budget...", flush=True)
     print(f"Label smoothing: {args.label_smoothing}", flush=True)
@@ -510,6 +613,16 @@ def main():
 
             batch_inputs = batch_inputs.to(device, non_blocking=True)
             batch_labels = batch_labels.to(device, non_blocking=True)
+
+            progress = elapsed / max(budget, 1e-6)
+            if (
+                args.freeze_backbone
+                and args.model == "clip-vit-l14"
+                and progress >= UNFREEZE_AT_PROGRESS
+            ):
+                clip_tail_unfroze = maybe_unfreeze_clip_tail(
+                    model, optimizer, args.lr, clip_tail_unfroze
+                )
 
             if WARMUP_STEPS > 0 and step < WARMUP_STEPS:
                 lr_scale = (step + 1) / WARMUP_STEPS
@@ -542,18 +655,24 @@ def main():
                     )
                     logits = model(mixed_inputs)
                     loss = mixed_loss(logits, labels_a, labels_b, lam, ls, focal_g)
+                    soft_targets = lam * one_hot_targets(labels_a) + (1 - lam) * one_hot_targets(labels_b)
                 elif use_mixup:
                     mixed_inputs, labels_a, labels_b, lam = mixup_batch(
                         batch_inputs, batch_labels, MIXUP_ALPHA
                     )
                     logits = model(mixed_inputs)
                     loss = mixed_loss(logits, labels_a, labels_b, lam, ls, focal_g)
+                    soft_targets = lam * one_hot_targets(labels_a) + (1 - lam) * one_hot_targets(labels_b)
                 else:
                     logits = model(batch_inputs)
                     if USE_FOCAL_LOSS:
                         loss = focal_cross_entropy(logits, batch_labels, ls, FOCAL_GAMMA)
                     else:
                         loss = F.cross_entropy(logits, batch_labels, label_smoothing=ls)
+                    soft_targets = one_hot_targets(batch_labels)
+
+                if BRIER_LAMBDA > 0:
+                    loss = loss + BRIER_LAMBDA * soft_brier_loss(logits, soft_targets)
 
                 if ENTROPY_LAMBDA > 0:
                     probs = torch.softmax(logits, dim=-1)
@@ -656,6 +775,7 @@ def main():
     print(f"cutmix_prob:              {CUTMIX_PROB}")
     print(f"focal_loss:               {USE_FOCAL_LOSS} (gamma={FOCAL_GAMMA})")
     print(f"entropy_lambda:           {ENTROPY_LAMBDA}")
+    print(f"brier_lambda:             {BRIER_LAMBDA}")
     print(f"ema_decay:                {EMA_DECAY}")
 
     if WANDB_AVAILABLE:
@@ -732,6 +852,7 @@ def main():
         "focal_loss": USE_FOCAL_LOSS,
         "focal_gamma": FOCAL_GAMMA,
         "entropy_lambda": ENTROPY_LAMBDA,
+        "brier_lambda": BRIER_LAMBDA,
         "ema_decay": EMA_DECAY,
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
