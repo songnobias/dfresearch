@@ -8,7 +8,7 @@ architecture tweaks, batch size, learning rate schedule, etc.
 
 The goal: maximize sn34_score on the validation set within the time budget.
 
-Available models: efficientnet-b4, resnet-50, clip-vit-l14, smogy-swin, convnext-base
+Available models: efficientnet-b4, resnet-50, clip-vit-l14, hybrid-clip-freq, smogy-swin, convnext-base
 
 Usage:
     uv run train_image.py
@@ -54,9 +54,10 @@ from prepare import (
 # HYPERPARAMETERS — The agent tunes these
 # ──────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = "clip-vit-l14"
+MODEL_NAME = "hybrid-clip-freq"
 LEARNING_RATE = 2e-4
 BACKBONE_LR_SCALE = 0.01
+FORENSIC_LR_SCALE = 0.35
 WEIGHT_DECAY = 0.05
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
 AUGMENT_LEVEL = 2
@@ -504,28 +505,53 @@ def main():
         or getattr(model, "swin", None)
         or getattr(model, "backbone", None)
     )
+    forensic_module = getattr(model, "forensic_branch", None)
     head_module = getattr(model, "head", None)
 
     if backbone_module is not None and head_module is not None:
         backbone_params = list(backbone_module.parameters())
+        forensic_params = list(forensic_module.parameters()) if forensic_module is not None else []
         head_params = list(head_module.parameters())
         backbone_ids = {id(p) for p in backbone_params}
+        forensic_ids = {id(p) for p in forensic_params}
         head_ids = {id(p) for p in head_params}
         other_params = [
             p for p in model.parameters()
             if p.requires_grad and id(p) not in backbone_ids and id(p) not in head_ids
+            and id(p) not in forensic_ids
         ]
         backbone_lr = args.lr * BACKBONE_LR_SCALE
-        optimizer = torch.optim.AdamW(
-            [
-                {"params": [p for p in backbone_params if p.requires_grad],
-                 "lr": backbone_lr, "base_lr": backbone_lr},
-                {"params": [p for p in head_params if p.requires_grad] + other_params,
-                 "lr": args.lr, "base_lr": args.lr},
-            ],
-            weight_decay=WEIGHT_DECAY,
+        param_groups = [
+            {
+                "params": [p for p in backbone_params if p.requires_grad],
+                "lr": backbone_lr,
+                "base_lr": backbone_lr,
+            },
+        ]
+        forensic_lr = args.lr * FORENSIC_LR_SCALE
+        if forensic_params:
+            param_groups.append(
+                {
+                    "params": [p for p in forensic_params if p.requires_grad],
+                    "lr": forensic_lr,
+                    "base_lr": forensic_lr,
+                }
+            )
+        param_groups.append(
+            {
+                "params": [p for p in head_params if p.requires_grad] + other_params,
+                "lr": args.lr,
+                "base_lr": args.lr,
+            }
         )
-        print(f"Optimizer: backbone lr={backbone_lr:.1e}, head lr={args.lr:.1e}")
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
+        if forensic_params:
+            print(
+                f"Optimizer: backbone lr={backbone_lr:.1e}, "
+                f"forensic lr={forensic_lr:.1e}, head lr={args.lr:.1e}"
+            )
+        else:
+            print(f"Optimizer: backbone lr={backbone_lr:.1e}, head lr={args.lr:.1e}")
     else:
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
@@ -552,6 +578,7 @@ def main():
             config={
                 "modality": "image", "model": args.model,
                 "lr": args.lr, "backbone_lr_scale": BACKBONE_LR_SCALE,
+                "forensic_lr_scale": FORENSIC_LR_SCALE,
                 "batch_size": args.batch_size,
                 "time_budget": args.time_budget, "augment_level": AUGMENT_LEVEL,
                 "warmup_steps": WARMUP_STEPS, "grad_accum": GRAD_ACCUM_STEPS,
@@ -617,7 +644,7 @@ def main():
             progress = elapsed / max(budget, 1e-6)
             if (
                 args.freeze_backbone
-                and args.model == "clip-vit-l14"
+                and args.model in {"clip-vit-l14", "hybrid-clip-freq"}
                 and progress >= UNFREEZE_AT_PROGRESS
             ):
                 clip_tail_unfroze = maybe_unfreeze_clip_tail(
@@ -764,6 +791,7 @@ def main():
     print(f"batch_size:               {args.batch_size}")
     print(f"learning_rate:            {args.lr}")
     print(f"backbone_lr_scale:        {BACKBONE_LR_SCALE}")
+    print(f"forensic_lr_scale:        {FORENSIC_LR_SCALE}")
     print(f"weight_decay:             {WEIGHT_DECAY}")
     print(f"freeze_backbone:          {args.freeze_backbone}")
     print(f"label_smoothing:          {args.label_smoothing}")
@@ -840,6 +868,7 @@ def main():
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
         "backbone_lr_scale": BACKBONE_LR_SCALE,
+        "forensic_lr_scale": FORENSIC_LR_SCALE,
         "weight_decay": WEIGHT_DECAY,
         "freeze_backbone": args.freeze_backbone,
         "label_smoothing": args.label_smoothing,

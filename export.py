@@ -29,6 +29,7 @@ MODEL_MODULES = {
         "efficientnet-b4": "dfresearch.models.image.efficientnet",
         "resnet-50": "dfresearch.models.image.resnet50",
         "clip-vit-l14": "dfresearch.models.image.clip_vit",
+        "hybrid-clip-freq": "dfresearch.models.image.hybrid_clip_freq",
         "smogy-swin": "dfresearch.models.image.smogy_swin",
         "convnext-base": "dfresearch.models.image.convnext",
     },
