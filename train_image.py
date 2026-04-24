@@ -19,7 +19,9 @@ Usage:
 """
 
 import argparse
+import importlib
 import math
+from pathlib import Path
 import time
 import sys
 
@@ -35,6 +37,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 try:
     import wandb
@@ -57,17 +64,17 @@ from prepare import (
 MODEL_NAME = "hybrid-clip-freq"
 LEARNING_RATE = 2e-4
 BACKBONE_LR_SCALE = 0.01
-FORENSIC_LR_SCALE = 0.35
-WEIGHT_DECAY = 0.05
+FORENSIC_LR_SCALE = 0.75
+WEIGHT_DECAY = 0.03
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
-AUGMENT_LEVEL = 2
+AUGMENT_LEVEL = 3
 MAX_PER_CLASS = 20000
 WARMUP_STEPS = 200
 GRAD_ACCUM_STEPS = 4
 USE_AMP = True
 FREEZE_BACKBONE = True
 DROPOUT = 0.2
-LABEL_SMOOTHING = 0.01
+LABEL_SMOOTHING = 0.005
 ETA_MIN_LR_RATIO = 0.01
 
 # ── Calibration / regularization ──────────────────────────────────────────────
@@ -75,7 +82,7 @@ MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.0
-BRIER_LAMBDA = 0.15
+BRIER_LAMBDA = 0.2
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
@@ -88,25 +95,24 @@ FOCAL_GAMMA = 2.0
 DATASET_BALANCED_SAMPLING = True
 MEDIA_TYPE_TARGET_WEIGHTS = {
     "real": 1.0,
-    "synthetic": 1.25,
-    "semisynthetic": 2.5,
+    "synthetic": 1.4,
+    "semisynthetic": 3.5,
 }
-HARD_DATASET_KEYWORDS = (
-    "openfake",
-    "fakeclue",
-    "receipts",
-    "face-swap",
-    "retrievatar",
-    "pica",
-    "nano-banana",
-)
-HARD_DATASET_BOOST = 2.0
+HARD_DATASET_BOOSTS = {
+    "receipts": 4.5,
+    "openfake": 3.5,
+    "fakeclue": 3.0,
+    "pica": 3.0,
+    "face-swap": 2.2,
+    "retrievatar": 2.0,
+    "nano-banana": 1.8,
+}
 
 # ── Progressive CLIP unfreezing ───────────────────────────────────────────────
 STAGED_UNFREEZE = True
-UNFREEZE_AT_PROGRESS = 0.65
-UNFREEZE_LAST_N_LAYERS = 4
-UNFREEZE_LR_SCALE = 0.002
+UNFREEZE_AT_PROGRESS = 0.45
+UNFREEZE_LAST_N_LAYERS = 6
+UNFREEZE_LR_SCALE = 0.003
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -394,7 +400,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
 
     # ── Model ──
-    from dfresearch.models import get_model
+    get_model = importlib.import_module("dfresearch.models").get_model
     model = get_model(
         "image",
         args.model,
@@ -425,7 +431,10 @@ def main():
     # ── Data ──
     from collections import Counter
     from torch.utils.data import DataLoader, WeightedRandomSampler
-    from dfresearch.data import gather_samples, ImageDeepfakeDataset, load_dataset_config
+    df_data = importlib.import_module("dfresearch.data")
+    gather_samples = df_data.gather_samples
+    ImageDeepfakeDataset = df_data.ImageDeepfakeDataset
+    load_dataset_config = df_data.load_dataset_config
 
     train_samples = gather_samples("image", split="train", max_per_class=MAX_PER_CLASS)
     val_samples = gather_samples("image", split="val", max_per_class=MAX_PER_CLASS)
@@ -450,9 +459,11 @@ def main():
 
         def dataset_boost(name: str) -> float:
             lower_name = name.lower()
-            if any(keyword in lower_name for keyword in HARD_DATASET_KEYWORDS):
-                return HARD_DATASET_BOOST
-            return 1.0
+            boost = 1.0
+            for keyword, factor in HARD_DATASET_BOOSTS.items():
+                if keyword in lower_name:
+                    boost = max(boost, factor)
+            return boost
 
         sample_weights = torch.tensor(
             [

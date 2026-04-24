@@ -50,6 +50,37 @@ def color_contrast(img: np.ndarray, factor: float) -> np.ndarray:
     return adjusted.astype(np.uint8)
 
 
+def grayscale_rgb(img: np.ndarray) -> np.ndarray:
+    """Convert to grayscale and back to RGB."""
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+
+def resize_roundtrip(img: np.ndarray, scale: float, interpolation: int) -> np.ndarray:
+    """Downsample then upsample to mimic i2i / screenshot resampling artifacts."""
+    h, w = img.shape[:2]
+    new_w = max(32, int(w * scale))
+    new_h = max(32, int(h * scale))
+    small = cv2.resize(img, (new_w, new_h), interpolation=interpolation)
+    restored = cv2.resize(small, (w, h), interpolation=interpolation)
+    return restored
+
+
+def sharpen(img: np.ndarray, amount: float) -> np.ndarray:
+    """Apply unsharp masking."""
+    blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
+    sharp = cv2.addWeighted(img, 1.0 + amount, blurred, -amount, 0)
+    return np.clip(sharp, 0, 255).astype(np.uint8)
+
+
+def posterize(img: np.ndarray, levels: int) -> np.ndarray:
+    """Reduce tonal levels to mimic aggressive document/image transforms."""
+    levels = max(2, levels)
+    step = 255 / (levels - 1)
+    quantized = np.round(img.astype(np.float32) / step) * step
+    return np.clip(quantized, 0, 255).astype(np.uint8)
+
+
 AUGMENTATION_LEVELS = {
     0: [],
     1: [
@@ -61,6 +92,8 @@ AUGMENTATION_LEVELS = {
         lambda img: gaussian_blur(img, random.uniform(0.5, 1.5)),
         lambda img: gaussian_noise(img, random.uniform(3, 10)),
         lambda img: color_shift(img, random.uniform(5, 15)),
+        lambda img: resize_roundtrip(img, random.uniform(0.45, 0.8), cv2.INTER_LINEAR),
+        lambda img: grayscale_rgb(img),
     ],
     3: [
         lambda img: jpeg_compress(img, random.randint(15, 45)),
@@ -68,6 +101,10 @@ AUGMENTATION_LEVELS = {
         lambda img: gaussian_noise(img, random.uniform(8, 25)),
         lambda img: color_shift(img, random.uniform(10, 30)),
         lambda img: color_contrast(img, random.uniform(0.5, 1.5)),
+        lambda img: resize_roundtrip(img, random.uniform(0.25, 0.65), cv2.INTER_NEAREST),
+        lambda img: sharpen(img, random.uniform(0.4, 1.1)),
+        lambda img: posterize(img, random.randint(4, 10)),
+        lambda img: grayscale_rgb(img),
     ],
 }
 

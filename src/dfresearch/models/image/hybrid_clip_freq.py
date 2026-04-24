@@ -22,7 +22,7 @@ CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 class ResidualFrequencyBranch(nn.Module):
     """Lightweight forensic branch using fixed residual filters plus a CNN head."""
 
-    def __init__(self, out_dim: int = 256):
+    def __init__(self, out_dim: int = 384):
         super().__init__()
 
         kernels = torch.tensor(
@@ -31,39 +31,42 @@ class ResidualFrequencyBranch(nn.Module):
                 [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],   # sobel y
                 [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],    # sobel x
                 [[1.0, -2.0, 1.0], [-2.0, 4.0, -2.0], [1.0, -2.0, 1.0]],   # second derivative
+                [[-1.0, -1.0, -1.0], [-1.0, 8.0, -1.0], [-1.0, -1.0, -1.0]],  # high pass
+                [[-2.0, -1.0, 0.0], [-1.0, 1.0, 1.0], [0.0, 1.0, 2.0]],       # diagonal emboss
             ],
             dtype=torch.float32,
         )
         self.register_buffer("fixed_kernels", kernels.unsqueeze(1))
 
-        in_channels = 3 * kernels.shape[0] + 1  # residual filter maps + fft magnitude
+        in_channels = 3 * kernels.shape[0] + 3  # residual maps + fft + gray + local variance
         self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels, 48, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(48),
             nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(48, 96, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(96),
             nn.GELU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(96, 160, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(160),
             nn.GELU(),
-            nn.Conv2d(128, 192, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(192),
+            nn.Conv2d(160, 224, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(224),
             nn.GELU(),
             nn.AdaptiveAvgPool2d(1),
         )
         self.proj = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(192, out_dim),
+            nn.Linear(224, out_dim),
+            nn.LayerNorm(out_dim),
             nn.GELU(),
         )
         self.out_dim = out_dim
 
     def _residual_maps(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, 3, H, W] in [0, 1]
-        b, c, _, _ = x.shape
+        _, c, _, _ = x.shape
         kernel_bank = self.fixed_kernels.repeat(c, 1, 1, 1)
-        residual = F.conv2d(x, kernel_bank, padding=1, groups=c)
+        residual = torch.abs(F.conv2d(x, kernel_bank, padding=1, groups=c))
         return residual
 
     def _fft_map(self, x: torch.Tensor) -> torch.Tensor:
@@ -75,10 +78,20 @@ class ResidualFrequencyBranch(nn.Module):
         mag = mag / (mag.amax(dim=(-2, -1), keepdim=True) + 1e-6)
         return mag
 
+    def _local_variance_map(self, x: torch.Tensor) -> torch.Tensor:
+        gray = x.mean(dim=1, keepdim=True)
+        mean = F.avg_pool2d(gray, kernel_size=5, stride=1, padding=2)
+        mean_sq = F.avg_pool2d(gray * gray, kernel_size=5, stride=1, padding=2)
+        var = torch.relu(mean_sq - mean * mean)
+        var = var / (var.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+        return var
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = self._residual_maps(x)
         fft_mag = self._fft_map(x)
-        feats = torch.cat([residual, fft_mag], dim=1)
+        gray = x.mean(dim=1, keepdim=True)
+        local_var = self._local_variance_map(x)
+        feats = torch.cat([residual, fft_mag, gray, local_var], dim=1)
         feats = self.encoder(feats)
         return self.proj(feats)
 
@@ -93,7 +106,8 @@ class HybridCLIPFreqDetector(nn.Module):
         dropout: float = 0.2,
         freeze_backbone: bool = False,
         model_name: str = "openai/clip-vit-large-patch14",
-        forensic_dim: int = 256,
+        forensic_dim: int = 384,
+        eval_tta: bool = True,
     ):
         super().__init__()
 
@@ -116,24 +130,43 @@ class HybridCLIPFreqDetector(nn.Module):
 
         self.feat_dim = self.vision_model.config.hidden_size
         self.forensic_branch = ResidualFrequencyBranch(out_dim=forensic_dim)
+        self.eval_tta = eval_tta
 
         if freeze_backbone:
             for param in self.vision_model.parameters():
                 param.requires_grad = False
 
         fused_dim = self.feat_dim + self.forensic_branch.out_dim
+        self.semantic_head = nn.Sequential(
+            nn.LayerNorm(self.feat_dim),
+            nn.Linear(self.feat_dim, num_classes),
+        )
+        self.forensic_head = nn.Sequential(
+            nn.LayerNorm(self.forensic_branch.out_dim),
+            nn.Linear(self.forensic_branch.out_dim, num_classes),
+        )
         self.head = nn.Sequential(
             nn.LayerNorm(fused_dim),
-            nn.Linear(fused_dim, 512),
+            nn.Linear(fused_dim, 768),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, num_classes),
+            nn.Linear(768, num_classes),
         )
 
         self.register_buffer("mean", torch.tensor(CLIP_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(CLIP_STD).view(1, 3, 1, 1))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _document_view(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.float() / 255.0
+        gray = x.mean(dim=1, keepdim=True)
+        gray_rgb = gray.repeat(1, 3, 1, 1)
+        blur = F.avg_pool2d(gray_rgb, kernel_size=3, stride=1, padding=1)
+        sharpened = torch.clamp(gray_rgb + 0.8 * (gray_rgb - blur), 0.0, 1.0)
+        down = F.interpolate(sharpened, scale_factor=0.6, mode="bilinear", align_corners=False)
+        up = F.interpolate(down, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return up
+
+    def _forward_single(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float() / 255.0
         forensic_features = self.forensic_branch(x)
 
@@ -142,7 +175,19 @@ class HybridCLIPFreqDetector(nn.Module):
         pooled = outputs.pooler_output
 
         fused = torch.cat([pooled, forensic_features], dim=-1)
-        return self.head(fused)
+        fused_logits = self.head(fused)
+        semantic_logits = self.semantic_head(pooled)
+        forensic_logits = self.forensic_head(forensic_features)
+        return fused_logits + 0.35 * semantic_logits + 0.55 * forensic_logits
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self._forward_single(x)
+        if self.training or not self.eval_tta:
+            return logits
+
+        doc_view = torch.clamp(self._document_view(x) * 255.0, 0.0, 255.0)
+        doc_logits = self._forward_single(doc_view)
+        return 0.65 * logits + 0.35 * doc_logits
 
 
 def load_model(weights_path: str, num_classes: int = 2) -> nn.Module:
