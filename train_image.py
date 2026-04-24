@@ -64,7 +64,7 @@ from prepare import (
 MODEL_NAME = "hybrid-clip-freq"
 LEARNING_RATE = 2e-4
 BACKBONE_LR_SCALE = 0.01
-FORENSIC_LR_SCALE = 0.75
+FORENSIC_LR_SCALE = 0.9
 WEIGHT_DECAY = 0.03
 BATCH_SIZE = DEFAULT_IMAGE_BATCH_SIZE
 AUGMENT_LEVEL = 3
@@ -82,27 +82,29 @@ MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.0
-BRIER_LAMBDA = 0.2
+BRIER_LAMBDA = 0.12
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
 
 # ── Focal loss ────────────────────────────────────────────────────────────────
-USE_FOCAL_LOSS = False
-FOCAL_GAMMA = 2.0
+USE_FOCAL_LOSS = True
+FOCAL_GAMMA = 1.5
 
 # ── Dataset-balanced sampling ─────────────────────────────────────────────────
 DATASET_BALANCED_SAMPLING = True
 MEDIA_TYPE_TARGET_WEIGHTS = {
     "real": 1.0,
-    "synthetic": 1.4,
-    "semisynthetic": 3.5,
+    "synthetic": 1.35,
+    "semisynthetic": 12.0,
 }
 HARD_DATASET_BOOSTS = {
-    "receipts": 4.5,
-    "openfake": 3.5,
-    "fakeclue": 3.0,
-    "pica": 3.0,
+    "receipts-i2i": 14.0,
+    "i2i": 10.0,
+    "receipts": 6.0,
+    "openfake": 5.0,
+    "fakeclue": 3.5,
+    "pica": 5.0,
     "face-swap": 2.2,
     "retrievatar": 2.0,
     "nano-banana": 1.8,
@@ -110,9 +112,9 @@ HARD_DATASET_BOOSTS = {
 
 # ── Progressive CLIP unfreezing ───────────────────────────────────────────────
 STAGED_UNFREEZE = True
-UNFREEZE_AT_PROGRESS = 0.45
-UNFREEZE_LAST_N_LAYERS = 6
-UNFREEZE_LR_SCALE = 0.003
+UNFREEZE_AT_PROGRESS = 0.32
+UNFREEZE_LAST_N_LAYERS = 8
+UNFREEZE_LR_SCALE = 0.0035
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,14 +248,19 @@ def calibrate_logits(model, val_loader, device, amp_enabled):
     )
 
     with torch.no_grad():
-        last_linear = model.head[-1]
-        if isinstance(last_linear, nn.Linear):
-            last_linear.weight.data.div_(best_T)
-            last_linear.bias.data.div_(best_T)
-            if last_linear.bias is not None and last_linear.bias.numel() >= 2:
-                last_linear.bias.data[1].add_(best_alpha)
+        if hasattr(model, "calib_inv_temp") and hasattr(model, "calib_fake_bias"):
+            # Hybrid (and similar): logits = sum of branches; scale the full 2-class output.
+            model.calib_inv_temp.fill_(1.0 / best_T)
+            model.calib_fake_bias.fill_(float(best_alpha))
         else:
-            print(f"WARNING: last layer is {type(last_linear)}, skipping weight scaling")
+            last_linear = model.head[-1]
+            if isinstance(last_linear, nn.Linear):
+                last_linear.weight.data.div_(best_T)
+                last_linear.bias.data.div_(best_T)
+                if last_linear.bias is not None and last_linear.bias.numel() >= 2:
+                    last_linear.bias.data[1].add_(best_alpha)
+            else:
+                print(f"WARNING: last layer is {type(last_linear)}, skipping weight scaling")
 
     return best_T, best_alpha
 

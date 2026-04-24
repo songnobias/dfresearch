@@ -107,7 +107,7 @@ class HybridCLIPFreqDetector(nn.Module):
         freeze_backbone: bool = False,
         model_name: str = "openai/clip-vit-large-patch14",
         forensic_dim: int = 384,
-        eval_tta: bool = True,
+        eval_tta: bool = False,
     ):
         super().__init__()
 
@@ -155,6 +155,20 @@ class HybridCLIPFreqDetector(nn.Module):
 
         self.register_buffer("mean", torch.tensor(CLIP_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(CLIP_STD).view(1, 3, 1, 1))
+        # Post-hoc calibration: logits are scaled as [l0, l1] / T, then l1 += alpha
+        # (set by train_image.calibrate_logits; must apply to the full fused output, not
+        # only the main MLP head, since logits combine three branches.)
+        self.register_buffer("calib_inv_temp", torch.tensor(1.0))
+        self.register_buffer("calib_fake_bias", torch.tensor(0.0))
+
+    def _apply_logit_calib(self, logits: torch.Tensor) -> torch.Tensor:
+        t = self.calib_inv_temp.to(device=logits.device, dtype=logits.dtype)
+        b = self.calib_fake_bias.to(device=logits.device, dtype=logits.dtype)
+        out = logits * t
+        if out.size(-1) >= 2:
+            out = out.clone()
+            out[:, 1] = out[:, 1] + b
+        return out
 
     def _document_view(self, x: torch.Tensor) -> torch.Tensor:
         x = x.float() / 255.0
@@ -178,16 +192,16 @@ class HybridCLIPFreqDetector(nn.Module):
         fused_logits = self.head(fused)
         semantic_logits = self.semantic_head(pooled)
         forensic_logits = self.forensic_head(forensic_features)
-        return fused_logits + 0.35 * semantic_logits + 0.55 * forensic_logits
+        return fused_logits + 0.25 * semantic_logits + 0.65 * forensic_logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits = self._forward_single(x)
         if self.training or not self.eval_tta:
-            return logits
-
+            return self._apply_logit_calib(logits)
         doc_view = torch.clamp(self._document_view(x) * 255.0, 0.0, 255.0)
         doc_logits = self._forward_single(doc_view)
-        return 0.65 * logits + 0.35 * doc_logits
+        combined = 0.82 * logits + 0.18 * doc_logits
+        return self._apply_logit_calib(combined)
 
 
 def load_model(weights_path: str, num_classes: int = 2) -> nn.Module:
