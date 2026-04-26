@@ -118,7 +118,7 @@ def export_model(
         Path to the output ZIP file.
     """
     if checkpoint_dir is None:
-        checkpoint_dir = Path("results/checkpoints") / modality
+        checkpoint_dir = Path("results/results/checkpoints") / modality
 
     weights = checkpoint_dir / "model.safetensors"
     if not weights.exists():
@@ -174,7 +174,7 @@ def main():
         "--checkpoint-dir",
         type=Path,
         default=None,
-        help="Checkpoint directory (default: results/checkpoints/{modality})",
+        help="Checkpoint directory (default: results/results/checkpoints/{modality})",
     )
     parser.add_argument(
         "--output-dir",

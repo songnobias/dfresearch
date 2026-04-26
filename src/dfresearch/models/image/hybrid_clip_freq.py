@@ -204,10 +204,49 @@ class HybridCLIPFreqDetector(nn.Module):
         return self._apply_logit_calib(combined)
 
 
+def _strip_nested_vision_prefix(state_dict: dict) -> dict:
+    """Map vision_model.vision_model.* -> vision_model.* when weights have an extra CLIP nesting level."""
+    prefix = "vision_model.vision_model."
+    out = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            out["vision_model." + k[len(prefix) :]] = v
+        else:
+            out[k] = v
+    return out
+
+
+def _add_nested_vision_prefix(state_dict: dict) -> dict:
+    """Map vision_model.* -> vision_model.vision_model.* when weights omit CLIPVisionModel's inner prefix."""
+    double = "vision_model.vision_model."
+    single = "vision_model."
+    out = {}
+    for k, v in state_dict.items():
+        if k.startswith(double):
+            out[k] = v
+        elif k.startswith(single):
+            out[double + k[len(single) :]] = v
+        else:
+            out[k] = v
+    return out
+
+
 def load_model(weights_path: str, num_classes: int = 2) -> nn.Module:
     """Load model with saved weights (gasbench entry point)."""
     model = HybridCLIPFreqDetector(num_classes=num_classes, pretrained=False)
     state_dict = load_file(weights_path)
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as first_err:
+        last_err = first_err
+        for remap in (_strip_nested_vision_prefix, _add_nested_vision_prefix):
+            remapped = remap(state_dict)
+            try:
+                model.load_state_dict(remapped, strict=True)
+                break
+            except RuntimeError as e:
+                last_err = e
+        else:
+            raise last_err
     model.train(False)
     return model

@@ -34,6 +34,14 @@ def load_model_from_checkpoint(
     device: str = "cuda",
 ):
     """Load a model from a safetensors checkpoint."""
+    # hybrid-clip-freq: use package load_model (CLIP state_dict key remaps match gasbench export).
+    if modality == "image" and model_name == "hybrid-clip-freq":
+        from dfresearch.models.image.hybrid_clip_freq import load_model as load_hybrid
+
+        model = load_hybrid(str(weights_path), num_classes=2)
+        model.eval()
+        return model.to(device)
+
     from dfresearch.models import get_model
     from safetensors.torch import load_file
 
