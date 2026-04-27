@@ -108,6 +108,7 @@ class HybridCLIPFreqDetector(nn.Module):
         model_name: str = "openai/clip-vit-large-patch14",
         forensic_dim: int = 384,
         eval_tta: bool = False,
+        tta_hflip: bool = False,
     ):
         super().__init__()
 
@@ -131,6 +132,7 @@ class HybridCLIPFreqDetector(nn.Module):
         self.feat_dim = self.vision_model.config.hidden_size
         self.forensic_branch = ResidualFrequencyBranch(out_dim=forensic_dim)
         self.eval_tta = eval_tta
+        self.tta_hflip = tta_hflip
 
         if freeze_backbone:
             for param in self.vision_model.parameters():
@@ -195,13 +197,19 @@ class HybridCLIPFreqDetector(nn.Module):
         return fused_logits + 0.25 * semantic_logits + 0.65 * forensic_logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            return self._apply_logit_calib(self._forward_single(x))
+
         logits = self._forward_single(x)
-        if self.training or not self.eval_tta:
-            return self._apply_logit_calib(logits)
-        doc_view = torch.clamp(self._document_view(x) * 255.0, 0.0, 255.0)
-        doc_logits = self._forward_single(doc_view)
-        combined = 0.82 * logits + 0.18 * doc_logits
-        return self._apply_logit_calib(combined)
+        if self.tta_hflip:
+            # Average with horizontal flip (eval only; no grad)
+            x_flip = torch.flip(x, dims=(-1,))
+            logits = 0.5 * (logits + self._forward_single(x_flip))
+        if self.eval_tta:
+            doc_view = torch.clamp(self._document_view(x) * 255.0, 0.0, 255.0)
+            doc_logits = self._forward_single(doc_view)
+            logits = 0.82 * logits + 0.18 * doc_logits
+        return self._apply_logit_calib(logits)
 
 
 def _strip_nested_vision_prefix(state_dict: dict) -> dict:
@@ -231,9 +239,29 @@ def _add_nested_vision_prefix(state_dict: dict) -> dict:
     return out
 
 
-def load_model(weights_path: str, num_classes: int = 2) -> nn.Module:
-    """Load model with saved weights (gasbench entry point)."""
-    model = HybridCLIPFreqDetector(num_classes=num_classes, pretrained=False)
+def load_model(
+    weights_path: str,
+    num_classes: int = 2,
+    *,
+    eval_tta: bool = True,
+    tta_hflip: bool = True,
+    **kwargs: object,
+) -> nn.Module:
+    """Load model with saved weights (gasbench / competition entry point).
+
+    Test-time augmentations (enabled by default for eval only) help robustness on
+    held-out / multi-source benchmarks; training uses ``eval_tta=False`` and
+    ``tta_hflip=False``. Final sn34_score still depends on trained weights and
+    post-hoc calibration (``calib_inv_temp`` / ``calib_fake_bias``) when present.
+    Unknown ``kwargs`` are ignored for forward compatibility with model_config.
+    """
+    _ = kwargs
+    model = HybridCLIPFreqDetector(
+        num_classes=num_classes,
+        pretrained=False,
+        eval_tta=bool(eval_tta),
+        tta_hflip=bool(tta_hflip),
+    )
     state_dict = load_file(weights_path)
     try:
         model.load_state_dict(state_dict, strict=True)

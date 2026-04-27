@@ -59,6 +59,9 @@ from prepare import (
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HYPERPARAMETERS — The agent tunes these
+# For hybrid-clip-freq, post-train calibration and val metrics use the same TTA as
+# gasbench (see _set_hybrid_inference_tta + hybrid_clip_freq.load_model defaults).
+# sn34 and exam pass rate still depend on data, budget, and weights — not guaranteed.
 # ──────────────────────────────────────────────────────────────────────────────
 
 MODEL_NAME = "hybrid-clip-freq"
@@ -78,11 +81,12 @@ LABEL_SMOOTHING = 0.005
 ETA_MIN_LR_RATIO = 0.01
 
 # ── Calibration / regularization ──────────────────────────────────────────────
+# Slightly higher Brier aux weight helps sn34 (Brier_norm is dominant in the geomean).
 MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.0
-BRIER_LAMBDA = 0.12
+BRIER_LAMBDA = 0.16
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
@@ -96,7 +100,8 @@ DATASET_BALANCED_SAMPLING = True
 MEDIA_TYPE_TARGET_WEIGHTS = {
     "real": 1.0,
     "synthetic": 1.35,
-    "semisynthetic": 12.0,
+    # Upweight semisynthetic: gasbench often includes it; weak here drags exam accuracy
+    "semisynthetic": 18.0,
 }
 HARD_DATASET_BOOSTS = {
     "receipts-i2i": 14.0,
@@ -112,8 +117,9 @@ HARD_DATASET_BOOSTS = {
 
 # ── Progressive CLIP unfreezing ───────────────────────────────────────────────
 STAGED_UNFREEZE = True
-UNFREEZE_AT_PROGRESS = 0.32
-UNFREEZE_LAST_N_LAYERS = 8
+# Slightly earlier tail unfreeze for hybrid-clip-freq to adapt CLIP to forensic mix
+UNFREEZE_AT_PROGRESS = 0.28
+UNFREEZE_LAST_N_LAYERS = 9
 UNFREEZE_LR_SCALE = 0.0035
 
 
@@ -320,6 +326,16 @@ def soft_brier_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor
 
 def one_hot_targets(labels: torch.Tensor, num_classes: int = 2) -> torch.Tensor:
     return F.one_hot(labels, num_classes=num_classes).float()
+
+
+def _set_hybrid_inference_tta(model: nn.Module, model_name: str, enabled: bool) -> None:
+    """Use the same TTA as ``hybrid_clip_freq.load_model`` (gasbench) for val calibration and metrics."""
+    if model_name != "hybrid-clip-freq":
+        return
+    if not (hasattr(model, "eval_tta") and hasattr(model, "tta_hflip")):
+        return
+    model.eval_tta = bool(enabled)
+    model.tta_hflip = bool(enabled)
 
 
 def maybe_unfreeze_clip_tail(model, optimizer, head_lr: float, already_unfroze: bool) -> bool:
@@ -614,6 +630,7 @@ def main():
                 "entropy_lambda": ENTROPY_LAMBDA,
                 "brier_lambda": BRIER_LAMBDA,
                 "ema_decay": EMA_DECAY,
+                "hybrid_gasbench_tta": args.model == "hybrid-clip-freq",
                 "num_params_M": round(num_params / 1e6, 1),
                 "num_trainable_M": round(num_trainable / 1e6, 1),
                 "train_samples": len(train_loader.dataset),
@@ -768,6 +785,11 @@ def main():
         print("\nApplying EMA weights for evaluation...")
         ema.apply_shadow(model)
 
+    # Match gasbench inference (TTA) for hybrid so calibration + sn34/acc match submission
+    _set_hybrid_inference_tta(model, args.model, True)
+    if args.model == "hybrid-clip-freq":
+        print("Hybrid: eval TTA (hflip + document view) enabled for calibration and val metrics (gasbench parity).")
+
     # ── Logit calibration ──
     calibration_temperature = 1.0
     calibration_alpha = 0.0
@@ -901,6 +923,7 @@ def main():
         "entropy_lambda": ENTROPY_LAMBDA,
         "brier_lambda": BRIER_LAMBDA,
         "ema_decay": EMA_DECAY,
+        "hybrid_gasbench_tta": args.model == "hybrid-clip-freq",
     }
     (runs_dir / f"{ts}_meta.json").write_text(json.dumps(run_meta, indent=2))
 

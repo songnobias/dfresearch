@@ -63,15 +63,20 @@ PREPROCESSING_CONFIGS = {
 
 def generate_model_config(modality: str, model_name: str) -> dict:
     """Generate model_config.yaml content."""
+    model_block: dict = {
+        "num_classes": 2,
+        "weights_file": "model.safetensors",
+    }
+    # Match train_image + hybrid_clip_freq.load_model defaults for exam/gasbench parity
+    if modality == "image" and model_name == "hybrid-clip-freq":
+        model_block["eval_tta"] = True
+        model_block["tta_hflip"] = True
     return {
         "name": f"dfresearch-{model_name}",
         "version": "1.0.0",
         "modality": modality,
         "preprocessing": PREPROCESSING_CONFIGS[modality],
-        "model": {
-            "num_classes": 2,
-            "weights_file": "model.safetensors",
-        },
+        "model": model_block,
     }
 
 
