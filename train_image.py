@@ -86,14 +86,14 @@ MIXUP_ALPHA = 0.0
 CUTMIX_ALPHA = 0.0
 CUTMIX_PROB = 0.0
 ENTROPY_LAMBDA = 0.0
-BRIER_LAMBDA = 0.16
+BRIER_LAMBDA = 0.22
 
 # ── EMA ───────────────────────────────────────────────────────────────────────
 EMA_DECAY = 0.9998
 
 # ── Focal loss ────────────────────────────────────────────────────────────────
 USE_FOCAL_LOSS = True
-FOCAL_GAMMA = 1.5
+FOCAL_GAMMA = 2.0
 
 # ── Dataset-balanced sampling ─────────────────────────────────────────────────
 DATASET_BALANCED_SAMPLING = True
@@ -101,7 +101,7 @@ MEDIA_TYPE_TARGET_WEIGHTS = {
     "real": 1.0,
     "synthetic": 1.35,
     # Upweight semisynthetic: gasbench often includes it; weak here drags exam accuracy
-    "semisynthetic": 18.0,
+    "semisynthetic": 22.0,
 }
 HARD_DATASET_BOOSTS = {
     "receipts-i2i": 14.0,
@@ -118,8 +118,8 @@ HARD_DATASET_BOOSTS = {
 # ── Progressive CLIP unfreezing ───────────────────────────────────────────────
 STAGED_UNFREEZE = True
 # Slightly earlier tail unfreeze for hybrid-clip-freq to adapt CLIP to forensic mix
-UNFREEZE_AT_PROGRESS = 0.28
-UNFREEZE_LAST_N_LAYERS = 9
+UNFREEZE_AT_PROGRESS = 0.26
+UNFREEZE_LAST_N_LAYERS = 10
 UNFREEZE_LR_SCALE = 0.0035
 
 
@@ -162,10 +162,13 @@ class ModelEMA:
 # Logit calibration
 # ──────────────────────────────────────────────────────────────────────────────
 
-def calibrate_logits(model, val_loader, device, amp_enabled):
+def calibrate_logits(model, val_loader, device, amp_enabled, exhaustive: bool = False):
     """
     Jointly calibrate temperature and an additive fake-logit bias on the
     validation set.
+
+    When ``exhaustive`` is True (hybrid-clip-freq), runs an extra fine grid search
+    around the best (T, alpha) to squeeze more production_sn34 from validation.
 
     Recent work on open-world AI-image detection shows that detectors under
     distribution shift often need a threshold/logit shift in addition to
@@ -244,6 +247,20 @@ def calibrate_logits(model, val_loader, device, amp_enabled):
                 best_alpha = float(alpha)
                 best_brier = brier
                 best_mcc = mcc
+
+    if exhaustive:
+        # Tighter mesh around the best point (helps sn34 on hybrid after TTA logits)
+        v_temps = np.linspace(max(0.15, best_T * 0.92), best_T * 1.08, 55)
+        v_alphas = np.linspace(best_alpha - 0.45, best_alpha + 0.45, 121)
+        for temp in v_temps:
+            for alpha in v_alphas:
+                score, brier, mcc = score_params(float(temp), float(alpha))
+                if score > best_score:
+                    best_score = score
+                    best_T = float(temp)
+                    best_alpha = float(alpha)
+                    best_brier = brier
+                    best_mcc = mcc
 
     print(
         "Logit calibration: "
@@ -796,7 +813,11 @@ def main():
     if not args.no_temperature_calibration:
         print("\nCalibrating temperature + fake-logit bias on validation set...")
         calibration_temperature, calibration_alpha = calibrate_logits(
-            model, val_loader, device, amp_enabled
+            model,
+            val_loader,
+            device,
+            amp_enabled,
+            exhaustive=(args.model == "hybrid-clip-freq"),
         )
 
     # ── Evaluation ──

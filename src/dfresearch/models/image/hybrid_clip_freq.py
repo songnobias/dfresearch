@@ -3,10 +3,17 @@ Hybrid CLIP + lightweight forensic detector for image deepfake detection.
 
 Combines:
 1. CLIP ViT-L/14 pooled semantic embedding
-2. A compact residual-frequency branch built from fixed high-pass filters
+2. A compact residual-frequency branch (spatial high-pass filters + FFT cues)
+
+The forensic FFT map mixes grayscale spectrum with per-channel FFT magnitude
+(generators often leave chroma / frequency footprints). Branch fusion weights
+emphasize the forensic head for synthetic cues.
 
 Input:  [B, 3, H, W] uint8 [0, 255]
 Output: [B, 2] logits [real, synthetic]
+
+Note: sn34 on full + holdout benchmarks depends on training and data; there is
+no architecture-only guarantee of any fixed score (e.g. 0.9).
 """
 
 import torch
@@ -70,11 +77,21 @@ class ResidualFrequencyBranch(nn.Module):
         return residual
 
     def _fft_map(self, x: torch.Tensor) -> torch.Tensor:
-        # grayscale FFT magnitude summary map
+        """Log-magnitude spectrum: blend grayscale FFT with max per-RGB-channel FFT."""
         gray = x.mean(dim=1, keepdim=True)
-        fft = torch.fft.fft2(gray, norm="ortho")
-        fft = torch.fft.fftshift(fft, dim=(-2, -1))
-        mag = torch.log1p(torch.abs(fft))
+        fft_g = torch.fft.fft2(gray, norm="ortho")
+        fft_g = torch.fft.fftshift(fft_g, dim=(-2, -1))
+        mag_g = torch.log1p(torch.abs(fft_g))
+
+        per_ch = []
+        for c in range(3):
+            ch = x[:, c : c + 1, :, :]
+            fc = torch.fft.fft2(ch, norm="ortho")
+            fc = torch.fft.fftshift(fc, dim=(-2, -1))
+            per_ch.append(torch.log1p(torch.abs(fc)))
+        mag_c, _ = torch.max(torch.cat(per_ch, dim=1), dim=1, keepdim=True)
+
+        mag = 0.55 * mag_g + 0.45 * mag_c
         mag = mag / (mag.amax(dim=(-2, -1), keepdim=True) + 1e-6)
         return mag
 
@@ -194,7 +211,8 @@ class HybridCLIPFreqDetector(nn.Module):
         fused_logits = self.head(fused)
         semantic_logits = self.semantic_head(pooled)
         forensic_logits = self.forensic_head(forensic_features)
-        return fused_logits + 0.25 * semantic_logits + 0.65 * forensic_logits
+        # Forensic branch carries high-pass / FFT cues; weight it slightly higher for sn34
+        return fused_logits + 0.22 * semantic_logits + 0.72 * forensic_logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
